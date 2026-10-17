@@ -4,7 +4,7 @@
 
 > 完整说明见 [使用说明书.md](使用说明书.md)：人设设置、代码配置、记忆/情感系统、常见问题。
 
-[![怡悠聊天界面](screenshot.png)](screenshot.png)
+[![怡悠聊天界面](screenshot.png)](https://github.com/YQQS268/yiyou/blob/main/screenshot.png?raw=true)
 
 ---
 
