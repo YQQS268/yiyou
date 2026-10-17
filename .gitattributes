@@ -1,0 +1,10 @@
+# 统一换行符：文本文件在仓库中存 LF，检出时按系统自动转换
+* text=auto
+
+# Windows 批处理/脚本必须用 CRLF，否则可能无法运行
+*.bat text eol=crlf
+*.vbs text eol=crlf
+
+# 二进制文件不转换
+*.png binary
+*.jpg binary

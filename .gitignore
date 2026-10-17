@@ -1,0 +1,18 @@
+# ===== 私密 / 运行时数据（绝不提交、绝不外传） =====
+config.json
+state.json
+yiyou.md
+yiyou.log.md
+yiyou.backup.md
+backup/
+parse_errors.log
+
+# ===== Python =====
+__pycache__/
+*.pyc
+
+# ===== 系统 / 编辑器垃圾文件 =====
+Thumbs.db
+.DS_Store
+.vscode/
+.idea/

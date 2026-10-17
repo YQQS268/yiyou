@@ -1,0 +1,348 @@
+<!DOCTYPE html>
+<!-- 怡悠（yiyou）· AI 恋人陪伴智能体 · Copyright (c) 2026 YQQS268 · 个人/非商业使用许可，详见 LICENSE -->
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>怡悠</title>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  html, body { height: 100%; }
+  body {
+    font-family: -apple-system, "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif;
+    background: #ededed;
+    display: flex;
+    flex-direction: column;
+    overflow: hidden;
+  }
+
+  .header {
+    height: 52px;
+    background: #f7f7f7;
+    border-bottom: 1px solid #d9d9d9;
+    display: flex;
+    align-items: center;
+    padding: 0 14px;
+    flex-shrink: 0;
+  }
+  .header .avatar {
+    width: 36px; height: 36px;
+    border-radius: 6px;
+    background: #6d8adf;
+    color: #fff;
+    display: flex; align-items: center; justify-content: center;
+    font-size: 18px;
+    margin-right: 10px;
+    user-select: none;
+  }
+  .header .name { font-size: 16px; font-weight: 600; color: #191919; }
+  .header .status { font-size: 12px; color: #999; margin-left: 8px; }
+
+  .messages {
+    flex: 1;
+    overflow-y: auto;
+    padding: 14px;
+    display: flex;
+    flex-direction: column;
+    gap: 14px;
+  }
+  .time-divider {
+    text-align: center;
+    font-size: 11px;
+    color: #b2b2b2;
+    margin: 2px 0;
+    user-select: none;
+  }
+  .msg { display: flex; align-items: flex-start; gap: 8px; }
+  .msg.user { flex-direction: row-reverse; }
+  .msg .avatar {
+    width: 38px; height: 38px;
+    border-radius: 6px;
+    flex-shrink: 0;
+    display: flex; align-items: center; justify-content: center;
+    font-size: 15px;
+    color: #fff;
+    user-select: none;
+  }
+  .msg.yiyou .avatar { background: #6d8adf; }
+  .msg.user .avatar { background: #95ec69; color: #191919; }
+  .avatar { position: relative; overflow: hidden; }
+  .avatar .avatar-img {
+    position: absolute; inset: 0;
+    width: 100%; height: 100%;
+    object-fit: cover;
+    display: none;
+  }
+  .avatar .avatar-img.loaded { display: block; }
+  .msg .body { max-width: 72%; display: flex; flex-direction: column; }
+  .msg.user .body { align-items: flex-end; }
+  .msg .bubble {
+    padding: 9px 12px;
+    border-radius: 8px;
+    font-size: 15px;
+    line-height: 1.5;
+    word-break: break-word;
+    white-space: pre-wrap;
+  }
+  .msg.yiyou .bubble {
+    background: #fff;
+    color: #191919;
+    border-top-left-radius: 2px;
+  }
+  .msg.user .bubble {
+    background: #95ec69;
+    color: #191919;
+    border-top-right-radius: 2px;
+  }
+  .msg .meta { font-size: 10px; color: #b2b2b2; margin-top: 3px; user-select: none; }
+
+  .typing .bubble {
+    display: flex; gap: 4px; align-items: center; padding: 12px 14px;
+  }
+  .typing .dot {
+    width: 6px; height: 6px; border-radius: 50%;
+    background: #b2b2b2;
+    animation: blink 1.2s infinite;
+  }
+  .typing .dot:nth-child(2) { animation-delay: 0.2s; }
+  .typing .dot:nth-child(3) { animation-delay: 0.4s; }
+  @keyframes blink { 0%, 60%, 100% { opacity: 0.25; } 30% { opacity: 1; } }
+
+  .input-bar {
+    display: flex;
+    gap: 8px;
+    padding: 10px 12px;
+    background: #f7f7f7;
+    border-top: 1px solid #d9d9d9;
+    flex-shrink: 0;
+  }
+  .input-bar input {
+    flex: 1;
+    border: 1px solid #e0e0e0;
+    background: #fff;
+    border-radius: 6px;
+    padding: 10px 12px;
+    font-size: 15px;
+    outline: none;
+    font-family: inherit;
+  }
+  .input-bar input:focus { border-color: #6d8adf; }
+  .input-bar button {
+    border: none;
+    background: #6d8adf;
+    color: #fff;
+    padding: 0 20px;
+    border-radius: 6px;
+    font-size: 15px;
+    cursor: pointer;
+    font-family: inherit;
+  }
+  .input-bar button:hover { background: #5a7bd6; }
+  .input-bar button:disabled { background: #b9c6ea; cursor: not-allowed; }
+</style>
+</head>
+<body>
+  <div class="header">
+    <div class="avatar" id="yiyouAvatar"><span class="avatar-text">怡</span></div>
+    <div class="name">怡悠</div>
+    <div class="status">在线</div>
+  </div>
+
+  <div class="messages" id="messages"></div>
+
+  <div class="input-bar">
+    <input id="input" type="text" placeholder="说点什么…" autocomplete="off">
+    <button id="send">发送</button>
+  </div>
+
+<script>
+  const messagesEl = document.getElementById('messages');
+  const inputEl = document.getElementById('input');
+  const sendBtn = document.getElementById('send');
+
+  // 当前会话上下文（传给后端做多轮对话）
+  let messages = [];
+
+  function scrollBottom() {
+    messagesEl.scrollTop = messagesEl.scrollHeight;
+  }
+
+  function nowTime() {
+    const d = new Date();
+    const p = n => String(n).padStart(2, '0');
+    return p(d.getHours()) + ':' + p(d.getMinutes());
+  }
+
+  function addTimeDivider(text) {
+    const div = document.createElement('div');
+    div.className = 'time-divider';
+    div.textContent = text;
+    messagesEl.appendChild(div);
+  }
+
+  // 头像图片：加载成功显示图片、盖住文字色块；加载失败则移除图片，保留文字
+  function attachAvatarImg(avatarEl, src) {
+    const img = document.createElement('img');
+    img.className = 'avatar-img';
+    img.src = src;
+    img.alt = '';
+    img.onload = function () { img.classList.add('loaded'); };
+    img.onerror = function () { img.remove(); };
+    avatarEl.appendChild(img);
+  }
+
+  // 顶栏怡悠头像
+  attachAvatarImg(document.getElementById('yiyouAvatar'), '/avatar_yiyou.png');
+
+  function addBubble(who, text, showMeta = true) {
+    const wrap = document.createElement('div');
+    wrap.className = 'msg ' + who;
+
+    const avatar = document.createElement('div');
+    avatar.className = 'avatar';
+    const avatarText = document.createElement('span');
+    avatarText.className = 'avatar-text';
+    avatarText.textContent = who === 'yiyou' ? '怡' : '我';
+    avatar.appendChild(avatarText);
+    attachAvatarImg(avatar, who === 'yiyou' ? '/avatar_yiyou.png' : '/avatar_user.png');
+    wrap.appendChild(avatar);
+
+    const body = document.createElement('div');
+    body.className = 'body';
+
+    const bubble = document.createElement('div');
+    bubble.className = 'bubble';
+    bubble.textContent = text;
+    body.appendChild(bubble);
+
+    if (showMeta) {
+      const meta = document.createElement('div');
+      meta.className = 'meta';
+      meta.textContent = nowTime();
+      body.appendChild(meta);
+    }
+
+    wrap.appendChild(body);
+    messagesEl.appendChild(wrap);
+    scrollBottom();
+    return wrap;
+  }
+
+  // 把怡悠的一条回复按空行拆成多条短气泡（像微信连发），只有最后一条显示时间
+  function addYiyouReply(text) {
+    const parts = String(text || '').split(/\n\s*\n/).map(s => s.trim()).filter(Boolean);
+    if (parts.length === 0) return;
+    parts.forEach((p, i) => addBubble('yiyou', p, i === parts.length - 1));
+  }
+
+  // 用户的消息也按标点拆成多条短气泡（像微信连发），不再一问一答
+  function addUserReply(text) {
+    const parts = String(text || '')
+      .replace(/([，。！？!?…])/g, '$1\u0001')
+      .split('\u0001')
+      .map(s => s.trim())
+      .filter(Boolean);
+    if (parts.length === 0) return;
+    parts.forEach((p, i) => addBubble('user', p, i === parts.length - 1));
+  }
+
+  function showTyping() {
+    const wrap = document.createElement('div');
+    wrap.className = 'msg yiyou typing';
+    wrap.id = 'typing';
+
+    const avatar = document.createElement('div');
+    avatar.className = 'avatar';
+    avatar.textContent = '怡';
+    wrap.appendChild(avatar);
+
+    const bubble = document.createElement('div');
+    bubble.className = 'bubble';
+    for (let i = 0; i < 3; i++) {
+      const dot = document.createElement('span');
+      dot.className = 'dot';
+      bubble.appendChild(dot);
+    }
+    wrap.appendChild(bubble);
+
+    messagesEl.appendChild(wrap);
+    scrollBottom();
+  }
+
+  function hideTyping() {
+    const el = document.getElementById('typing');
+    if (el) el.remove();
+  }
+
+  async function sendChat(msgs) {
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), 120000);
+    try {
+      const resp = await fetch('/chat', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ messages: msgs }),
+        signal: controller.signal
+      });
+      const data = await resp.json();
+      if (!resp.ok || data.error) {
+        throw new Error(data.error || ('请求失败 ' + resp.status));
+      }
+      return data.reply;
+    } catch (err) {
+      if (err.name === 'AbortError') {
+        throw new Error('她好像卡了一下，稍等或再发一次试试');
+      }
+      throw err;
+    } finally {
+      clearTimeout(timer);
+    }
+  }
+
+  async function onSend() {
+    const text = inputEl.value.trim();
+    if (!text) return;
+    inputEl.value = '';
+    addUserReply(text);
+    messages.push({ role: 'user', content: text });
+    sendBtn.disabled = true;
+    showTyping();
+    try {
+      const reply = await sendChat(messages);
+      hideTyping();
+      addYiyouReply(reply);
+      messages.push({ role: 'assistant', content: reply });
+    } catch (err) {
+      hideTyping();
+      addBubble('yiyou', '（出错了：' + err.message + '）');
+    } finally {
+      sendBtn.disabled = false;
+      inputEl.focus();
+    }
+  }
+
+  sendBtn.addEventListener('click', onSend);
+  inputEl.addEventListener('keydown', e => {
+    if (e.key === 'Enter' && !e.isComposing) {
+      e.preventDefault();
+      onSend();
+    }
+  });
+
+  // 打开页面后，让怡悠主动开场问候
+  (async function opening() {
+    addTimeDivider('今天');
+    showTyping();
+    try {
+      const reply = await sendChat([]);
+      hideTyping();
+      addYiyouReply(reply);
+      messages.push({ role: 'assistant', content: reply });
+    } catch (err) {
+      hideTyping();
+      addBubble('yiyou', '（连接失败：' + err.message + '。请确认已启动 app.py 并填好 API Key。）');
+    }
+  })();
+</script>
+</body>
+</html>

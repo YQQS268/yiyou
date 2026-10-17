@@ -1,0 +1,7 @@
+{
+  "api_key": "在这里填入你的 DeepSeek API Key（https://platform.deepseek.com 申请）",
+  "base_url": "https://api.deepseek.com",
+  "model": "deepseek-flash",
+  "city": "北京",
+  "notify_enabled": true
+}
