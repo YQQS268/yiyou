@@ -98,7 +98,7 @@
 
 ## 联系与反馈
 
-作者：YQQS268 · 仓库：https://github.com/YQQS268/yiyou · 有问题欢迎到仓库提 issue。
+作者：YQQS268 · QQ：3786004990（仅项目交流）· 仓库：https://github.com/YQQS268/yiyou · 有问题欢迎到仓库提 issue。
 
 ---
 
