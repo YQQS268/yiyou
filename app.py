@@ -5,6 +5,26 @@
 # 许可：个人/非商业使用，详见 LICENSE。
 """怡悠 —— 本地心理陪伴智能体后端（纯 Python 标准库，零第三方依赖）"""
 
+# =====================================================================
+# 文件目录（改代码前先看这里，按需跳转；行号会随改动漂移，以 def 名为准）
+#
+#   常量区（~19-132）     路径 / 记忆锚点 / 配置 / 锁 / DEFAULT_CONFIG
+#   配置读写              load_config / save_config（133/144）
+#   文件读写              read_text / read_bytes（149/156）
+#   会话延续              load_session / save_session / append_session（163/176/182）
+#   图片分享              save_attachment / cleanup_attachments（197/225）
+#   记忆快照与日志        snapshot_memory / append_log / _read_log_lines（242/264/274）
+#   API 调用与解析        call_deepseek / parse_reply / _is_fallback（305/343/338）
+#   记忆写入              append_memory / emotion_remember（412/425）
+#   记忆压缩与提炼        summarize_* / compress_old_* / recompress_* / refine_*（~469-871）
+#   主动通知              show_notification / try_notify / background_evolve（873/940/979）
+#   结构化提取            extract_structured / apply_structured（1023/1084）
+#   检索与提示词          retrieve_memory / build_system（1185/1239）
+#   HTTP 路由             Handler.do_GET / do_POST（1287）
+#   入口                  main（1501）——启动清空 session、注册 AUMID、起后台线程
+# =====================================================================
+
+import base64
 import json
 import os
 import re
@@ -25,6 +45,7 @@ MEMORY_PATH = os.path.join(BASE_DIR, "yiyou.md")
 LOG_PATH = os.path.join(BASE_DIR, "yiyou.log.md")
 BACKUP_PATH = os.path.join(BASE_DIR, "yiyou.backup.md")
 INDEX_PATH = os.path.join(BASE_DIR, "index.html")
+SESSION_PATH = os.path.join(BASE_DIR, "session.json")
 PORT = 8787
 
 # 头像等静态图片：仅允许 BASE_DIR 下的图片文件（防路径遍历）
@@ -93,8 +114,15 @@ LOG_BATCH_LINES = 20
 # 生活快照提炼：攒多少天（生活行）提炼成「她的日子」一段
 DAILY_BATCH_DAYS = 7
 
+# 图片分享：附件目录、保留天数（0=永久保留）、单图大小上限、视觉细节级别（original=保留原图，看截图文字清晰）
+ATTACH_DIR = os.path.join(BASE_DIR, "attachments")
+ATTACHMENT_KEEP_DAYS = 30
+MAX_IMAGE_BYTES = 10 * 1024 * 1024
+IMAGE_DETAIL = "original"
+
 MEMORY_LOCK = threading.Lock()
 LOG_LOCK = threading.Lock()
+SESSION_LOCK = threading.Lock()
 
 DEFAULT_CONFIG = {
     "api_key": "",
@@ -154,6 +182,85 @@ def read_bytes(path):
         return None
     with open(path, "rb") as f:
         return f.read()
+
+
+def load_session():
+    """读当前会话（session.json）。不存在或损坏时返回空列表。"""
+    if not os.path.exists(SESSION_PATH):
+        return []
+    try:
+        with open(SESSION_PATH, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        msgs = data.get("messages") or []
+        return msgs if isinstance(msgs, list) else []
+    except Exception:
+        return []
+
+
+def save_session(messages):
+    """把当前会话消息列表写入 session.json（仅存 role/content/time，界面回显用）。"""
+    with open(SESSION_PATH, "w", encoding="utf-8") as f:
+        json.dump({"messages": messages}, f, ensure_ascii=False, indent=2)
+
+
+def append_session(role, content, image=None):
+    """把一条消息追加进当前会话（role: user/assistant）。带锁，防并发读写撕裂。image 为附件 URL（可选）。"""
+    with SESSION_LOCK:
+        msgs = load_session()
+        entry = {
+            "role": role,
+            "content": content,
+            "time": datetime.now().strftime("%Y-%m-%d %H:%M"),
+        }
+        if image:
+            entry["image"] = image
+        msgs.append(entry)
+        save_session(msgs)
+
+
+def save_attachment(data_url):
+    """把 base64 data URL 存到 attachments/，返回 (url, stored_name)。失败返回 (None, None)。"""
+    try:
+        header, b64 = data_url.split(",", 1)
+        if ";" in header:
+            mime = header.split(";")[0].split(":")[1].lower()
+        else:
+            mime = header.split(":")[1].lower()
+        ext = {
+            "image/jpeg": ".jpg",
+            "image/png": ".png",
+            "image/gif": ".gif",
+            "image/webp": ".webp",
+        }.get(mime)
+        if not ext:
+            return None, None
+        raw = base64.b64decode(b64)
+        if len(raw) > MAX_IMAGE_BYTES:
+            return None, None
+        os.makedirs(ATTACH_DIR, exist_ok=True)
+        name = datetime.now().strftime("%Y%m%d%H%M%S") + "_" + os.urandom(4).hex() + ext
+        with open(os.path.join(ATTACH_DIR, name), "wb") as f:
+            f.write(raw)
+        return "/attach/" + name, name
+    except Exception:
+        return None, None
+
+
+def cleanup_attachments():
+    """按 ATTACHMENT_KEEP_DAYS 回收过期附件。0=永久保留，跳过。失败静默。"""
+    if ATTACHMENT_KEEP_DAYS <= 0 or not os.path.isdir(ATTACH_DIR):
+        return
+    try:
+        cutoff = time.time() - ATTACHMENT_KEEP_DAYS * 86400
+        for name in os.listdir(ATTACH_DIR):
+            p = os.path.join(ATTACH_DIR, name)
+            try:
+                if os.path.isfile(p) and os.path.getmtime(p) < cutoff:
+                    os.remove(p)
+            except Exception:
+                pass
+    except Exception:
+        pass
 
 
 def snapshot_memory():
@@ -835,21 +942,10 @@ def show_notification(title, msg):
 
 
 def append_active_say(msg):
-    """把怡悠主动弹出去的话补进历史区（措辞留痕）。"""
+    """把怡悠主动弹出去的话追加进日志（措辞留痕），与普通回复格式一致，供检索读取。"""
     try:
-        with MEMORY_LOCK:
-            text = read_text(MEMORY_PATH)
-            if not text:
-                return
-            stamp = datetime.now().strftime("%Y-%m-%d %H:%M")
-            lines = [f"- [{stamp}] 怡悠（主动）：{_flat(msg)}"]
-            text = insert_between(text, HISTORY_START, HISTORY_END, lines)
-            with open(MEMORY_PATH, "w", encoding="utf-8") as f:
-                f.write(text)
-            try:
-                shutil.copyfile(MEMORY_PATH, BACKUP_PATH)
-            except Exception:
-                pass
+        stamp = datetime.now().strftime("%Y-%m-%d %H:%M")
+        append_log([f"[{stamp}] 怡悠：{_flat(msg)}"])
     except Exception as e:
         print(f"[warn] 主动说落盘失败：{e}")
 
@@ -924,6 +1020,10 @@ def background_evolve(cfg):
             recompress_keyevents(cfg)
         except Exception as e:
             print(f"[warn] 关键节点封顶失败：{e}")
+        try:
+            cleanup_attachments()
+        except Exception as e:
+            print(f"[warn] 附件回收失败：{e}")
         try:
             # 主动发信息：克制生成待说的话 + 五道防线过滤后通知
             emotion.generate_to_say(cfg)
@@ -1218,6 +1318,32 @@ class Handler(BaseHTTPRequestHandler):
                 return
             self._send(200, html, "text/html; charset=utf-8")
             return
+        if self.path == "/session":
+            # 消费她主动弹的话（通知已弹出、还没展示）：补进会话历史，页面打开就能看到
+            try:
+                _state = emotion.load_state()
+                _said = _state.get("pending_said") or []
+                if _said:
+                    _state["pending_said"] = []
+                    emotion.save_state(_state)
+                    for s in _said:
+                        append_session("assistant", s)
+            except Exception:
+                pass
+            self._send(200, json.dumps({"messages": load_session()}, ensure_ascii=False))
+            return
+        # 附件图片（用户分享的图）：仅允许 attachments 目录下、白名单扩展名，防路径遍历
+        if self.path.startswith("/attach/"):
+            name = os.path.basename(self.path)
+            stem, ext = os.path.splitext(name)
+            ext = ext.lower()
+            if ext in IMG_CONTENT_TYPES:
+                data = read_bytes(os.path.join(ATTACH_DIR, name))
+                if data is not None:
+                    self._send(200, data, IMG_CONTENT_TYPES[ext])
+                    return
+            self._send(404, "Not Found", "text/plain; charset=utf-8")
+            return
         # 静态图片（头像等）：仅允许 BASE_DIR 下的图片文件，防路径遍历
         name = os.path.basename(self.path)
         stem, ext = os.path.splitext(name)
@@ -1258,14 +1384,26 @@ class Handler(BaseHTTPRequestHandler):
             self._send(500, json.dumps({"error": "尚未配置 API Key，请在 config.json 里填入。"}, ensure_ascii=False))
             return
 
-        # 先取最后一条用户消息，用于检索记忆
+        # 先取最后一条用户消息，用于检索记忆；同时取它带的图片（data URL）和原文件名
         user_msg = ""
+        user_image = None
+        user_file_name = ""
         for m in reversed(messages):
             if m.get("role") == "user":
                 user_msg = m.get("content", "")
+                user_image = m.get("image") or None
+                user_file_name = m.get("fileName") or ""
                 break
 
         system_msg = build_system(cfg, user_msg)
+
+        # 图片分享：把用户发的图片（base64 data URL）存盘，得到服务端 URL
+        attach_url = None
+        attach_name = None
+        if user_image and str(user_image).startswith("data:image/"):
+            attach_url, attach_name = save_attachment(user_image)
+            if not attach_url:
+                print("[warn] 图片存盘失败（类型或大小不符）")
 
         # 空 messages = 刚打开窗口，让怡悠主动开场问候
         if not messages:
@@ -1276,6 +1414,7 @@ class Handler(BaseHTTPRequestHandler):
                 reply = "\n\n".join(_said)
                 _state["pending_said"] = list()
                 emotion.save_state(_state)
+                append_session("assistant", reply)
                 self._send(200, json.dumps({"reply": reply, "analysis": ""}, ensure_ascii=False))
                 return
             opening = "（对方刚刚打开对话窗口，还没说话。请你主动、简短地打个招呼，口语化一点，带一点熟悉感，不要每次都一样，别写成长篇大论。）"
@@ -1294,7 +1433,23 @@ class Handler(BaseHTTPRequestHandler):
                 {"role": "user", "content": opening},
             ]
         else:
-            api_messages = [{"role": "system", "content": system_msg}] + messages
+            session_ctx = [
+                {"role": m.get("role"), "content": m.get("content", "")}
+                for m in load_session()
+            ]
+            # 把带图片的 user 消息转成多模态 content（数组），图片以 image_url 块喂给视觉
+            api_chat = []
+            for m in messages:
+                role = m.get("role")
+                content = m.get("content", "")
+                img = m.get("image")
+                if role == "user" and img and str(img).startswith("data:image/"):
+                    blocks = [{"type": "text", "text": content or "（对方发了一张图片）"}]
+                    blocks.append({"type": "image_url", "image_url": {"url": img, "detail": IMAGE_DETAIL}})
+                    api_chat.append({"role": "user", "content": blocks})
+                else:
+                    api_chat.append({"role": role, "content": content})
+            api_messages = [{"role": "system", "content": system_msg}] + session_ctx + api_chat
 
         try:
             message = call_deepseek(cfg, api_messages, thinking="enabled")
@@ -1314,8 +1469,14 @@ class Handler(BaseHTTPRequestHandler):
                 pass
 
         if user_msg and reply and not _is_fallback(reply):
+            # 图片分享进记忆：日志里记「[分享图片] 原文件名」+ 文字，供提炼进主记忆
+            if attach_url:
+                img_note = "[分享图片] " + (user_file_name or (attach_name or "图片"))
+                memory_msg = (user_msg + "（" + img_note + "）") if user_msg else img_note
+            else:
+                memory_msg = user_msg
             try:
-                append_memory(user_msg, reply, analysis)
+                append_memory(memory_msg, reply, analysis)
             except Exception as e:
                 print(f"[warn] 记忆写入失败：{e}")
             # 情感系统：后台线程标注这次对话对怡悠情绪的影响并更新状态（失败静默降级，不阻塞回复）
@@ -1334,6 +1495,16 @@ class Handler(BaseHTTPRequestHandler):
             except Exception:
                 pass
 
+        # 会话延续：把这一轮追加进 session.json（界面回显）。开场白只记怡悠的话，正常轮记双方。
+        if reply and not _is_fallback(reply):
+            try:
+                if user_msg or attach_url:
+                    _sess_content = user_msg if user_msg else ("[图片]" if attach_url else "")
+                    append_session("user", _sess_content, image=attach_url)
+                append_session("assistant", reply)
+            except Exception as e:
+                print(f"[warn] 会话写入失败：{e}")
+
         self._send(200, json.dumps({"reply": reply, "analysis": analysis}, ensure_ascii=False))
 
     def log_message(self, format, *args):
@@ -1344,6 +1515,8 @@ def main():
     cfg = load_config()
     ensure_api_key(cfg)
     ensure_memory_files()
+    # 服务器启动 = 新会话：清空 session.json（浏览器重开接旧会话，服务器重启才开新会话）
+    save_session([])
     # 注册 AUMID，让通知进入操作中心留记录
     register_aumid()
     # 后台演化线程：情绪稳态 + 定时压缩（daemon，随主程序退出）

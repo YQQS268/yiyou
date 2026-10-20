@@ -95,6 +95,43 @@
     border-top-right-radius: 2px;
   }
   .msg .meta { font-size: 10px; color: #b2b2b2; margin-top: 3px; user-select: none; }
+  .bubble-img {
+    max-width: 200px;
+    max-height: 260px;
+    border-radius: 4px;
+    display: block;
+    margin-bottom: 4px;
+  }
+  #imgBtn {
+    padding: 0 14px;
+    background: #e0e0e0;
+    color: #191919;
+    font-size: 20px;
+    font-weight: 600;
+  }
+  #imgBtn:hover { background: #d0d0d0; }
+  .img-preview {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 8px 12px;
+    background: #f7f7f7;
+    border-top: 1px solid #d9d9d9;
+  }
+  .img-preview img {
+    height: 56px;
+    border-radius: 4px;
+  }
+  .img-preview button {
+    border: none;
+    background: #e0e0e0;
+    border-radius: 50%;
+    width: 22px;
+    height: 22px;
+    cursor: pointer;
+    line-height: 1;
+    font-size: 14px;
+  }
 
   .typing .bubble {
     display: flex; gap: 4px; align-items: center; padding: 12px 14px;
@@ -150,18 +187,32 @@
 
   <div class="messages" id="messages"></div>
 
+  <div class="img-preview" id="imgPreview" style="display:none">
+    <img id="imgPreviewThumb" alt="待发送图片">
+    <button id="imgPreviewClear" type="button">×</button>
+  </div>
+
   <div class="input-bar">
+    <button id="imgBtn" type="button">＋</button>
     <input id="input" type="text" placeholder="说点什么…" autocomplete="off">
     <button id="send">发送</button>
   </div>
+  <input id="imgInput" type="file" accept="image/jpeg,image/png,image/gif,image/webp" style="display:none">
 
 <script>
   const messagesEl = document.getElementById('messages');
   const inputEl = document.getElementById('input');
   const sendBtn = document.getElementById('send');
+  const imgBtn = document.getElementById('imgBtn');
+  const imgInput = document.getElementById('imgInput');
+  const imgPreview = document.getElementById('imgPreview');
+  const imgPreviewThumb = document.getElementById('imgPreviewThumb');
+  const imgPreviewClear = document.getElementById('imgPreviewClear');
 
-  // 当前会话上下文（传给后端做多轮对话）
-  let messages = [];
+  // 待发送的图片（选图后暂存，点发送时随消息一起发）
+  let pendingImage = null; // { dataUrl, name }
+
+  // 会话状态在后端 session.json，前端不再自己维护 messages 数组
 
   function scrollBottom() {
     messagesEl.scrollTop = messagesEl.scrollHeight;
@@ -194,7 +245,7 @@
   // 顶栏怡悠头像
   attachAvatarImg(document.getElementById('yiyouAvatar'), '/avatar_yiyou.png');
 
-  function addBubble(who, text, showMeta = true) {
+  function addBubble(who, text, showMeta = true, time = null, image = null) {
     const wrap = document.createElement('div');
     wrap.className = 'msg ' + who;
 
@@ -212,13 +263,24 @@
 
     const bubble = document.createElement('div');
     bubble.className = 'bubble';
-    bubble.textContent = text;
+    if (image) {
+      const img = document.createElement('img');
+      img.className = 'bubble-img';
+      img.src = image;
+      img.alt = '';
+      bubble.appendChild(img);
+    }
+    if (text) {
+      const span = document.createElement('span');
+      span.textContent = text;
+      bubble.appendChild(span);
+    }
     body.appendChild(bubble);
 
     if (showMeta) {
       const meta = document.createElement('div');
       meta.className = 'meta';
-      meta.textContent = nowTime();
+      meta.textContent = time || nowTime();
       body.appendChild(meta);
     }
 
@@ -229,21 +291,21 @@
   }
 
   // 把怡悠的一条回复按空行拆成多条短气泡（像微信连发），只有最后一条显示时间
-  function addYiyouReply(text) {
+  function addYiyouReply(text, time = null) {
     const parts = String(text || '').split(/\n\s*\n/).map(s => s.trim()).filter(Boolean);
     if (parts.length === 0) return;
-    parts.forEach((p, i) => addBubble('yiyou', p, i === parts.length - 1));
+    parts.forEach((p, i) => addBubble('yiyou', p, i === parts.length - 1, time));
   }
 
   // 用户的消息也按标点拆成多条短气泡（像微信连发），不再一问一答
-  function addUserReply(text) {
+  function addUserReply(text, time = null) {
     const parts = String(text || '')
       .replace(/([，。！？!?…])/g, '$1\u0001')
       .split('\u0001')
       .map(s => s.trim())
       .filter(Boolean);
     if (parts.length === 0) return;
-    parts.forEach((p, i) => addBubble('user', p, i === parts.length - 1));
+    parts.forEach((p, i) => addBubble('user', p, i === parts.length - 1, time));
   }
 
   function showTyping() {
@@ -301,17 +363,31 @@
 
   async function onSend() {
     const text = inputEl.value.trim();
-    if (!text) return;
+    const img = pendingImage;
+    if (!text && !img) return;
     inputEl.value = '';
-    addUserReply(text);
-    messages.push({ role: 'user', content: text });
+    pendingImage = null;
+    imgPreview.style.display = 'none';
+    imgPreviewThumb.src = '';
+    // 本地先显示：图片单独一个气泡，文字走逗号拆多条气泡（图+文时只在文字气泡显示时间）
+    if (img) {
+      addBubble('user', '', !text, null, img.dataUrl);
+    }
+    if (text) {
+      addUserReply(text);
+    }
     sendBtn.disabled = true;
     showTyping();
     try {
-      const reply = await sendChat(messages);
+      const msg = { role: 'user', content: text };
+      if (img) {
+        msg.image = img.dataUrl;
+        msg.fileName = img.name;
+      }
+      // 只发这一条新消息，历史上下文由后端从 session.json 拼接
+      const reply = await sendChat([msg]);
       hideTyping();
       addYiyouReply(reply);
-      messages.push({ role: 'assistant', content: reply });
     } catch (err) {
       hideTyping();
       addBubble('yiyou', '（出错了：' + err.message + '）');
@@ -329,15 +405,114 @@
     }
   });
 
-  // 打开页面后，让怡悠主动开场问候
+  // 把文件读成 base64 data URL（GIF 不压缩，保留动画）
+  function readFileAsDataUrl(file) {
+    return new Promise((resolve, reject) => {
+      const reader = new FileReader();
+      reader.onload = () => resolve(reader.result);
+      reader.onerror = () => reject(new Error('读取失败'));
+      reader.readAsDataURL(file);
+    });
+  }
+
+  // 把图片压缩到最长边不超过 maxSide，返回 JPEG data URL
+  function compressImage(file, maxSide) {
+    return new Promise((resolve, reject) => {
+      const url = URL.createObjectURL(file);
+      const img = new Image();
+      img.onload = function () {
+        let w = img.width, h = img.height;
+        if (Math.max(w, h) > maxSide) {
+          const scale = maxSide / Math.max(w, h);
+          w = Math.round(w * scale);
+          h = Math.round(h * scale);
+        }
+        const canvas = document.createElement('canvas');
+        canvas.width = w;
+        canvas.height = h;
+        const ctx = canvas.getContext('2d');
+        ctx.drawImage(img, 0, 0, w, h);
+        URL.revokeObjectURL(url);
+        resolve(canvas.toDataURL('image/jpeg', 0.85));
+      };
+      img.onerror = function () {
+        URL.revokeObjectURL(url);
+        reject(new Error('读取失败'));
+      };
+      img.src = url;
+    });
+  }
+
+  // 选图：点"＋"触发文件选择；选完压缩并显示预览（GIF 不压缩保留动画）
+  imgBtn.addEventListener('click', () => imgInput.click());
+  imgInput.addEventListener('change', async () => {
+    const file = imgInput.files[0];
+    imgInput.value = '';
+    if (!file) return;
+    if (['image/jpeg', 'image/png', 'image/gif', 'image/webp'].indexOf(file.type) === -1) {
+      addBubble('yiyou', '（只支持 jpg / png / gif / webp 图片）');
+      return;
+    }
+    try {
+      const dataUrl = (file.type === 'image/gif')
+        ? await readFileAsDataUrl(file)
+        : await compressImage(file, 1600);
+      pendingImage = { dataUrl, name: file.name };
+      imgPreviewThumb.src = dataUrl;
+      imgPreview.style.display = 'flex';
+    } catch (err) {
+      addBubble('yiyou', '（图片读取失败：' + err.message + '）');
+    }
+  });
+  imgPreviewClear.addEventListener('click', () => {
+    pendingImage = null;
+    imgPreviewThumb.src = '';
+    imgPreview.style.display = 'none';
+  });
+
+  // 拉取当前会话（后端 session.json）
+  async function fetchSession() {
+    try {
+      const resp = await fetch('/session');
+      if (!resp.ok) return [];
+      const data = await resp.json();
+      return data.messages || [];
+    } catch (err) {
+      return [];
+    }
+  }
+
+  // 渲染历史会话：有历史就直接显示，不重新开场
+  function renderSession(msgs) {
+    for (const m of msgs) {
+      const t = m.time ? m.time.slice(11, 16) : null;
+      if (m.role === 'user') {
+        if (m.image) {
+          const hasText = m.content && m.content !== '[图片]';
+          addBubble('user', '', !hasText, t, m.image);
+          if (hasText) addUserReply(m.content, t);
+        } else {
+          addUserReply(m.content, t);
+        }
+      } else if (m.role === 'assistant') {
+        addYiyouReply(m.content, t);
+      }
+    }
+  }
+
+  // 打开页面：先接上旧会话；只有服务器重启后（session 为空）才让怡悠开场问候
   (async function opening() {
     addTimeDivider('今天');
+    const history = await fetchSession();
+    if (history.length > 0) {
+      renderSession(history);
+      return;
+    }
     showTyping();
     try {
       const reply = await sendChat([]);
       hideTyping();
       addYiyouReply(reply);
-      messages.push({ role: 'assistant', content: reply });
     } catch (err) {
       hideTyping();
       addBubble('yiyou', '（连接失败：' + err.message + '。请确认已启动 app.py 并填好 API Key。）');
