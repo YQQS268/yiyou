@@ -950,10 +950,24 @@ def append_active_say(msg):
         print(f"[warn] 主动说落盘失败：{e}")
 
 
+def _recently_said_goodnight():
+    """检查最近一轮对话是否已互道晚安/要睡。是则主动消息克制不弹（都睡了就别硬撩）。"""
+    try:
+        tail = _read_log_lines()[-6:]
+        if not tail:
+            return False
+        words = ("晚安", "睡了", "要睡", "去睡", "先睡", "睡觉", "早点休息", "闭眼")
+        return any(w in ln for ln in tail for w in words)
+    except Exception:
+        return False
+
+
 def try_notify(cfg):
-    """尝试主动通知：约定提醒（穿透一切限制）优先，普通待说的话只看每天次数（无时间冷却、无深夜限制）。"""
+    """尝试主动通知：约定提醒优先，普通待说的话只看每天次数（无时间冷却、无深夜限制）；互道晚安后统一克制不弹。"""
     if not cfg.get("notify_enabled", True):
         return  # 防线：总开关
+    if _recently_said_goodnight():
+        return  # 防线：刚互道晚安，不弹（约定提醒也克制）
     state = emotion.load_state()
     now = datetime.now()
     today = now.strftime("%Y-%m-%d")
@@ -1050,7 +1064,8 @@ def extract_structured(cfg, user_msg, reply):
         "- 没有可提取的就给空数组，不要硬凑。\n"
         "- profile_facts 只收「新」信息，寒暄和重复已知信息不收。\n"
         "- taboos 宁缺毋滥：只有对方明确回避/拒绝，或话题明显会刺痛对方时才记；普通负面情绪（累、烦、压力大）不算雷区。\n"
-        "- deferred 是「怡悠觉察到但暂不宜直说、留待以后」的分析，不是普通对话流水。\n\n"
+        "- deferred 是「怡悠觉察到但暂不宜直说、留待以后」的分析，不是普通对话流水。\n"
+        "- pending 和 reminders 必须用第三人称「对方/用户」描述，绝不能写成第一人称「我」——这些是对方的事，不是怡悠自己的事。\n\n"
         f"用户说：{user_msg}\n\n怡悠回复：{reply}\n"
     )
     payload = {
