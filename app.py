@@ -67,8 +67,6 @@ import emotion  # noqa: E402
 
 HISTORY_START = "<!-- HISTORY_START -->"
 HISTORY_END = "<!-- HISTORY_END -->"
-NOTES_START = "<!-- NOTES_START -->"
-NOTES_END = "<!-- NOTES_END -->"
 SUMMARY_START = "<!-- SUMMARY_START -->"
 SUMMARY_END = "<!-- SUMMARY_END -->"
 PROFILE_START = "<!-- PROFILE_START -->"
@@ -94,9 +92,6 @@ NOTIFY_DAILY_MAX = 2
 # 摘要区二次压缩：早期记忆摘要超过多少条时，把更早的再压成一条（保留最近 KEEP_RECENT_SUMMARY 条）
 MAX_SUMMARY_LINES = 12
 KEEP_RECENT_SUMMARY = 4
-
-# 笔记区压缩：记忆文件里最多保留的笔记条数，超出的压成「观察理解」进摘要区（让「为什么」长期化）
-MAX_NOTES_IN_FILE = 30
 
 # 画像区封顶：超过 MAX_PROFILE_LINES 条时，早期画像压成「稳定画像」，保留最近 KEEP_RECENT_PROFILE 条
 MAX_PROFILE_LINES = 20
@@ -170,7 +165,6 @@ def ensure_memory_files():
     if not os.path.exists(MEMORY_PATH):
         skeleton = (
             "<!-- HISTORY_START -->\n（暂无）\n<!-- HISTORY_END -->\n"
-            "<!-- NOTES_START -->\n（暂无）\n<!-- NOTES_END -->\n"
             "<!-- SUMMARY_START -->\n（暂无）\n<!-- SUMMARY_END -->\n"
             "<!-- PROFILE_START -->\n（暂无）\n<!-- PROFILE_END -->\n"
             "<!-- DEFERRED_START -->\n（暂无）\n<!-- DEFERRED_END -->\n"
@@ -538,18 +532,6 @@ def summarize_summary(cfg, lines):
     return _summarize(cfg, prompt, "你是记忆整理助手，把早期记忆摘要再压缩成精简的长期记忆要点，只输出要点本身。")
 
 
-def summarize_notes(cfg, lines):
-    """把较早的内部分析笔记压成「她对这段关系的观察与理解」要点（保留「为什么」）。"""
-    prompt = (
-        "下面是一些较早的「内部分析笔记」，记录的是怡悠当时对对方和这段关系的观察、判断、情绪来由与相处策略。"
-        "请把它们压缩成几句「她对这段关系的理解」要点："
-        "保留她对对方性格/状态/习惯的洞察、她判断对方状态的模式、她情绪变化的来由、以及她因此形成的相处方式。"
-        "去掉流水账式的思考过程和已经过时的临时判断。用中文写 2-5 句话，不要用列表、不要加标题。\n\n"
-        + "\n".join(lines)
-    )
-    return _summarize(cfg, prompt, "你是记忆整理助手，把分析笔记压缩成「她对这段关系的理解」要点，只输出要点本身。")
-
-
 def summarize_profile(cfg, lines):
     """把较早的用户画像条目压成「稳定画像」要点（保留长期稳定的身份/性格/习惯）。"""
     prompt = (
@@ -564,8 +546,10 @@ def summarize_profile(cfg, lines):
 def summarize_keyevents(cfg, lines):
     """把较早的关键节点条目压成一条更精简的要点。"""
     prompt = (
-        "下面是一些较早的「关键节点」条目。请把它们合并成一段更精简的长期要点："
-        "保留最重要、最能代表这段关系走向的事件，去掉重复、次要细节和过时信息。"
+        "下面是一些较早的「关键节点」条目，带 [landmark]/[major] 标记的是人生节点/人生大事，其余是时间段大事。"
+        "请把它们合并成一段更精简的长期要点："
+        "- [landmark]/[major]（人生节点/人生大事）必须保留，别丢、别一笔带过；"
+        "- 没有标记的时间段大事可以概括成一句带过，去掉重复、次要细节和过时信息。"
         "用中文写 2-4 句话，不要用列表、不要加标题。\n\n"
         + "\n".join(lines)
     )
@@ -680,45 +664,6 @@ def recompress_summary(cfg):
                 pass
     except Exception as e:
         print(f"[warn] 摘要二次压缩失败：{e}")
-
-
-def compress_old_notes(cfg):
-    """把超过保留条数的旧笔记压成「观察理解」要点写进摘要区，原文从笔记区移除（让「为什么」长期化）。"""
-    try:
-        with MEMORY_LOCK:
-            text = read_text(MEMORY_PATH)
-            if not text:
-                return
-            notes = _region(text, NOTES_START, NOTES_END)
-        note_lines = [ln.strip() for ln in notes.splitlines() if ln.strip()]
-        if len(note_lines) <= MAX_NOTES_IN_FILE:
-            return
-        overflow = note_lines[:len(note_lines) - MAX_NOTES_IN_FILE]
-        condensed = summarize_notes(cfg, overflow)
-        if not condensed:
-            return
-        with MEMORY_LOCK:
-            text = read_text(MEMORY_PATH)
-            if not text:
-                return
-            # 并发保护：另一线程可能已处理过这些旧笔记，重新确认仍在
-            current = [ln.strip() for ln in _region(text, NOTES_START, NOTES_END).splitlines() if ln.strip()]
-            still_there = [ln for ln in overflow if ln in current]
-            if not still_there:
-                return
-            stamp = datetime.now().strftime("%Y-%m-%d")
-            text = insert_between(text, SUMMARY_START, SUMMARY_END, [f"- [{stamp}] [观察] {_flat(condensed)}"])
-            kept = [ln for ln in current if ln not in still_there]
-            text = _replace_region(text, NOTES_START, NOTES_END, kept)
-            snapshot_memory()
-            with open(MEMORY_PATH, "w", encoding="utf-8") as f:
-                f.write(text)
-            try:
-                shutil.copyfile(MEMORY_PATH, BACKUP_PATH)
-            except Exception:
-                pass
-    except Exception as e:
-        print(f"[warn] 笔记压缩失败：{e}")
 
 
 def recompress_profile(cfg):
@@ -1013,10 +958,6 @@ def background_evolve(cfg):
         except Exception as e:
             print(f"[warn] 摘要二次压缩失败：{e}")
         try:
-            compress_old_notes(cfg)
-        except Exception as e:
-            print(f"[warn] 笔记压缩失败：{e}")
-        try:
             recompress_profile(cfg)
         except Exception as e:
             print(f"[warn] 画像封顶失败：{e}")
@@ -1044,7 +985,7 @@ def extract_structured(cfg, user_msg, reply):
         "只输出一个 JSON，不要输出任何其他内容。字段和判定标准：\n"
         '{"profile_facts": ["关于用户的新画像事实（身份、城市、爱好、家庭、工作学习、计划、习惯等，值得长期记住的）"], '
         '"taboos": ["雷区：用户明确表示不愿再谈的话题，或明显敏感、再提会刺痛对方的话题"], '
-        '"key_events": ["关键节点/重要事件：值得长期记住的重要事情"], '
+        '"key_events": [{"event": "关键节点/重要事件（值得长期记住）", "importance": "minor|landmark|major"}], '
         '"deferred": ["挑时机再说的话：怡悠看出来了但觉得现在直说会起反效果、想以后挑时机再说的分析"], '
         '"pending": ["未了心事：对方承诺过或说过会做、但还没兑现或还没下文的事（例如「结果出来告诉你」「忙完就找你」「下次带你去」），怡悠会惦记着、之后想主动追问的"], '
         '"reminders": ["约定提醒：用户明确要求「怡悠要主动提醒/主动说」的事（例如「睡前和我说晚安」「到点了提醒我」「记得催我」），这是用户对怡悠的明确授权，要优先兑现"], '
@@ -1055,7 +996,8 @@ def extract_structured(cfg, user_msg, reply):
         "- profile_facts 只收「新」信息，寒暄和重复已知信息不收。\n"
         "- taboos 宁缺毋滥：只有对方明确回避/拒绝，或话题明显会刺痛对方时才记；普通负面情绪（累、烦、压力大）不算雷区。\n"
         "- deferred 是「怡悠觉察到但暂不宜直说、留待以后」的分析，不是普通对话流水。\n"
-        "- pending 和 reminders 必须用第三人称「对方/用户」描述，绝不能写成第一人称「我」——这些是对方的事，不是怡悠自己的事。\n\n"
+        "- pending 和 reminders 必须用第三人称「对方/用户」描述，绝不能写成第一人称「我」——这些是对方的事，不是怡悠自己的事。\n"
+        "- key_events 的 importance 分级：minor=时间段大事（如做志愿者、参加活动，可随时间一笔带过）；landmark=人生节点（如拔智齿、毕业、换工作）；major=人生大事（极少数）。不确定就 minor。\n\n"
         f"用户说：{user_msg}\n\n怡悠回复：{reply}\n"
     )
     payload = {
@@ -1078,9 +1020,19 @@ def extract_structured(cfg, user_msg, reply):
             body = json.loads(resp.read().decode("utf-8"))
         content = body["choices"][0]["message"]["content"]
         result = json.loads(content)
-        for k in ("profile_facts", "taboos", "key_events", "deferred", "pending", "reminders"):
+        for k in ("profile_facts", "taboos", "deferred", "pending", "reminders"):
             v = result.get(k)
             result[k] = [str(x) for x in v] if isinstance(v, list) else []
+        # key_events 特殊处理：支持 [{event, importance}]，兼容旧字符串格式
+        ke = result.get("key_events") or []
+        norm_ke = []
+        if isinstance(ke, list):
+            for x in ke:
+                if isinstance(x, dict):
+                    norm_ke.append({"event": str(x.get("event") or ""), "importance": str(x.get("importance") or "minor")})
+                else:
+                    norm_ke.append({"event": str(x), "importance": "minor"})
+        result["key_events"] = norm_ke
         result["city"] = str(result.get("city") or "").strip()
         result["relation_signal"] = str(result.get("relation_signal") or "").strip()
         return result
@@ -1107,12 +1059,10 @@ def apply_structured(extracted):
         text = read_text(MEMORY_PATH)
         if not text:
             return
-        key_events = list(extracted.get("key_events") or [])
-        key_events += [f"约定：{x}" for x in (extracted.get("pending") or [])]
         sections = (
             (PROFILE_START, PROFILE_END, extracted.get("profile_facts")),
             (TABOOS_START, TABOOS_END, extracted.get("taboos")),
-            (KEYEVENTS_START, KEYEVENTS_END, key_events),
+            (KEYEVENTS_START, KEYEVENTS_END, extracted.get("key_events")),
             (DEFERRED_START, DEFERRED_END, extracted.get("deferred")),
         )
         for start_marker, end_marker, items in sections:
@@ -1121,7 +1071,13 @@ def apply_structured(extracted):
             existing = [ln.strip() for ln in _region(text, start_marker, end_marker).splitlines() if ln.strip()]
             new_items = []
             for x in items:
-                s = _flat(x)
+                # 统一解包：key_events 是 {event, importance}，其他区是字符串
+                if isinstance(x, dict):
+                    s = _flat(x.get("event") or "")
+                    imp = str(x.get("importance") or "minor")
+                else:
+                    s = _flat(x)
+                    imp = None
                 if not s:
                     continue
                 if start_marker == PROFILE_START:
@@ -1133,6 +1089,9 @@ def apply_structured(extracted):
                 else:
                     if any(_char_overlap(s, old) >= 0.7 for old in existing):
                         continue
+                # 人生节点/人生大事加分级标记（minor 时间段大事不标记，随封顶压缩一笔带过）
+                if imp and imp in ("landmark", "major"):
+                    s = f"[{imp}] {s}"
                 new_items.append(s)
             if not new_items:
                 continue
@@ -1153,19 +1112,29 @@ def structured_extract_and_apply(cfg, user_msg, reply):
         if not extracted:
             return
         apply_structured(extracted)
-        # pending（未了心事）+ deferred（挑时机再说的话）合并写进 state.json，供 generate_to_say 触发主动发信息
+        # pending（未了心事）+ deferred（挑时机再说的话）合并写进 state.json（带时间戳，供 10 天过期清理）
         pending = (extracted.get("pending") or []) + (extracted.get("deferred") or [])
         if pending:
             st = emotion.load_state()
-            merged = list(dict.fromkeys((st.get("pending") or []) + pending))
-            st["pending"] = merged[-10:]
+            _today = datetime.now().strftime("%Y-%m-%d")
+            _existing = {p.get("text") if isinstance(p, dict) else p for p in (st.get("pending") or [])}
+            for x in pending:
+                if x and x not in _existing:
+                    st["pending"] = (st.get("pending") or []) + [{"text": x, "added": _today}]
+                    _existing.add(x)
+            st["pending"] = st["pending"][-10:]
             emotion.save_state(st)
-        # reminders（约定提醒）写进 state.json，穿透一切限制、优先兑现
+        # reminders（约定提醒）写进 state.json（带时间戳，供 10 天过期清理），穿透一切限制、优先兑现
         reminders = extracted.get("reminders") or []
         if reminders:
             st = emotion.load_state()
-            merged_rem = list(dict.fromkeys((st.get("reminders") or []) + reminders))
-            st["reminders"] = merged_rem[-10:]
+            _today = datetime.now().strftime("%Y-%m-%d")
+            _existing_r = {r.get("text") if isinstance(r, dict) else r for r in (st.get("reminders") or [])}
+            for x in reminders:
+                if x and x not in _existing_r:
+                    st["reminders"] = (st.get("reminders") or []) + [{"text": x, "added": _today}]
+                    _existing_r.add(x)
+            st["reminders"] = st["reminders"][-10:]
             emotion.save_state(st)
         city = extracted.get("city") or ""
         if city and city != cfg.get("city"):

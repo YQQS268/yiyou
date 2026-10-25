@@ -206,7 +206,7 @@ def annotate_emotion(cfg, user_msg, reply):
 
 def on_conversation(cfg, user_msg, reply):
     """对话结束后调用：标注情绪影响 → 应用到状态。标注失败时也做自然衰减，情绪随时间回落。
-    返回情绪锚点 note（标注失败返回 None），供主程序反哺进记忆 NOTES 区。"""
+    返回情绪锚点 note（标注失败返回 None），供主程序写进日志（情绪：行）。"""
     result = annotate_emotion(cfg, user_msg, reply)
     state = load_state()
     note = None
@@ -256,16 +256,42 @@ def _gen_one_say(cfg, items):
         return None
 
 
+def _pending_text(item):
+    """兼容旧字符串格式与新 {text, added} 格式，返回文本。"""
+    return item.get("text") if isinstance(item, dict) else item
+
+
+def _expire_items(items, days):
+    """过滤掉超过 days 天未消费的约定/未了事。旧格式（无时间戳）视为不过期。"""
+    if not items:
+        return items
+    now = datetime.now()
+    kept = []
+    for it in items:
+        if isinstance(it, dict) and it.get("added"):
+            try:
+                added = datetime.strptime(it["added"], "%Y-%m-%d")
+                if (now - added).days > days:
+                    continue
+            except Exception:
+                pass
+        kept.append(it)
+    return kept
+
+
 def generate_to_say(cfg):
     """生成待说的话：约定提醒（reminders，穿透一切限制）优先，其次普通未了心事（pending）。生成后逐条消费，避免重启重复发。"""
     state = load_state()
     # 上一条已弹出但用户还没打开页面消费（pending_said 非空），不生成新的，避免连弹
     if state.get("pending_said"):
         return state
+    # 过期清理：无下文超 10 天的约定/未了事自动遗忘
+    state["reminders"] = _expire_items(state.get("reminders") or [], 10)
+    state["pending"] = _expire_items(state.get("pending") or [], 10)
     # 约定提醒：用户明确要求主动提醒/说的事，穿透一切限制
     reminders = state.get("reminders") or []
     if reminders and not state.get("to_say_reminder"):
-        content = _gen_one_say(cfg, [reminders[0]])
+        content = _gen_one_say(cfg, [_pending_text(reminders[0])])
         if content:
             state["to_say_reminder"] = [content]
             state["reminders"] = reminders[1:]
@@ -274,7 +300,7 @@ def generate_to_say(cfg):
     # 普通未了心事
     pending = state.get("pending") or []
     if pending and not state.get("to_say"):
-        content = _gen_one_say(cfg, [pending[0]])
+        content = _gen_one_say(cfg, [_pending_text(pending[0])])
         if content:
             state["to_say"] = [content]
             state["pending"] = pending[1:]
@@ -291,7 +317,7 @@ def get_mood_context(state=None):
         "这会影响你说话的方式：情绪低时话更短、更安静、更少主动；情绪高时话更多、更活泼。",
     ]
     if state.get("pending"):
-        lines.append("你惦记着这些未了的事：" + "；".join(state["pending"]) + "。")
+        lines.append("你惦记着这些未了的事：" + "；".join(_pending_text(p) for p in state["pending"]) + "。")
     if state.get("emotion_anchors"):
         recent = state["emotion_anchors"][-3:]
         lines.append("最近让你情绪变化的事：" + "；".join(a["event"] for a in recent) + "。")
