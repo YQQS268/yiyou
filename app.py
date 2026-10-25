@@ -46,6 +46,8 @@ LOG_PATH = os.path.join(BASE_DIR, "yiyou.log.md")
 BACKUP_PATH = os.path.join(BASE_DIR, "yiyou.backup.md")
 INDEX_PATH = os.path.join(BASE_DIR, "index.html")
 SESSION_PATH = os.path.join(BASE_DIR, "session.json")
+RECALL_STATS_PATH = os.path.join(BASE_DIR, "recall_stats.log")
+NOTIFY_FAIL_PATH = os.path.join(BASE_DIR, "notify_fail.log")
 PORT = 8787
 
 # 头像等静态图片：仅允许 BASE_DIR 下的图片文件（防路径遍历）
@@ -130,6 +132,12 @@ DEFAULT_CONFIG = {
     "model": "deepseek-flash",
     "city": "",
     "notify_enabled": True,
+    # 可配置参数（改 config.json 生效，删字段回退默认）
+    "keep_days": 7,
+    "attachment_keep_days": 30,
+    "proactive_max_per_day": 2,
+    "retrieve_log_limit": 30,
+    "retrieve_note_limit": 10,
 }
 
 
@@ -203,8 +211,9 @@ def save_session(messages):
         json.dump({"messages": messages}, f, ensure_ascii=False, indent=2)
 
 
-def append_session(role, content, image=None):
-    """把一条消息追加进当前会话（role: user/assistant）。带锁，防并发读写撕裂。image 为附件 URL（可选）。"""
+def append_session(role, content, image=None, images=None):
+    """把一条消息追加进当前会话（role: user/assistant）。带锁，防并发读写撕裂。
+    image 为单个附件 URL（向后兼容），images 为多图 URL 列表。"""
     with SESSION_LOCK:
         msgs = load_session()
         entry = {
@@ -212,8 +221,11 @@ def append_session(role, content, image=None):
             "content": content,
             "time": datetime.now().strftime("%Y-%m-%d %H:%M"),
         }
-        if image:
-            entry["image"] = image
+        imgs = list(images or [])
+        if image and image not in imgs:
+            imgs.append(image)
+        if imgs:
+            entry["images"] = imgs
         msgs.append(entry)
         save_session(msgs)
 
@@ -246,12 +258,13 @@ def save_attachment(data_url):
         return None, None
 
 
-def cleanup_attachments():
-    """按 ATTACHMENT_KEEP_DAYS 回收过期附件。0=永久保留，跳过。失败静默。"""
-    if ATTACHMENT_KEEP_DAYS <= 0 or not os.path.isdir(ATTACH_DIR):
+def cleanup_attachments(cfg=None):
+    """按 attachment_keep_days 回收过期附件。0=永久保留，跳过。失败静默。"""
+    _days = (cfg or {}).get("attachment_keep_days", ATTACHMENT_KEEP_DAYS)
+    if _days <= 0 or not os.path.isdir(ATTACH_DIR):
         return
     try:
-        cutoff = time.time() - ATTACHMENT_KEEP_DAYS * 86400
+        cutoff = time.time() - _days * 86400
         for name in os.listdir(ATTACH_DIR):
             p = os.path.join(ATTACH_DIR, name)
             try:
@@ -490,6 +503,17 @@ def _remove_lines_from_history(text, lines_to_remove):
     return pattern.sub(repl, text, count=1)
 
 
+def _summarize(cfg, prompt, system):
+    """统一的压缩调用：deepseek-flash + 关思考，返回纯文本。失败返回空串。"""
+    summary_cfg = dict(cfg)
+    summary_cfg["model"] = "deepseek-flash"
+    message = call_deepseek(summary_cfg, [
+        {"role": "system", "content": system},
+        {"role": "user", "content": prompt},
+    ], thinking="disabled")
+    return (message.get("content") or "").strip()
+
+
 def summarize_history(cfg, lines):
     """用 deepseek-flash（非思考模式）把旧对话压缩成长期记忆要点。"""
     prompt = (
@@ -499,13 +523,7 @@ def summarize_history(cfg, lines):
         "去掉寒暄和重复。用中文写 2-5 句话，不要用列表、不要加标题。\n\n"
         + "\n".join(lines)
     )
-    summary_cfg = dict(cfg)
-    summary_cfg["model"] = "deepseek-flash"
-    message = call_deepseek(summary_cfg, [
-        {"role": "system", "content": "你是记忆整理助手，把对话压缩成简洁的长期记忆要点，只输出要点本身。"},
-        {"role": "user", "content": prompt},
-    ], thinking="disabled")
-    return (message.get("content") or "").strip()
+    return _summarize(cfg, prompt, "你是记忆整理助手，把对话压缩成简洁的长期记忆要点，只输出要点本身。")
 
 
 def summarize_summary(cfg, lines):
@@ -517,13 +535,7 @@ def summarize_summary(cfg, lines):
         "去掉重复、次要细节和过时信息。用中文写 3-6 句话，不要用列表、不要加标题。\n\n"
         + "\n".join(lines)
     )
-    summary_cfg = dict(cfg)
-    summary_cfg["model"] = "deepseek-flash"
-    message = call_deepseek(summary_cfg, [
-        {"role": "system", "content": "你是记忆整理助手，把早期记忆摘要再压缩成精简的长期记忆要点，只输出要点本身。"},
-        {"role": "user", "content": prompt},
-    ], thinking="disabled")
-    return (message.get("content") or "").strip()
+    return _summarize(cfg, prompt, "你是记忆整理助手，把早期记忆摘要再压缩成精简的长期记忆要点，只输出要点本身。")
 
 
 def summarize_notes(cfg, lines):
@@ -535,13 +547,7 @@ def summarize_notes(cfg, lines):
         "去掉流水账式的思考过程和已经过时的临时判断。用中文写 2-5 句话，不要用列表、不要加标题。\n\n"
         + "\n".join(lines)
     )
-    summary_cfg = dict(cfg)
-    summary_cfg["model"] = "deepseek-flash"
-    message = call_deepseek(summary_cfg, [
-        {"role": "system", "content": "你是记忆整理助手，把分析笔记压缩成「她对这段关系的理解」要点，只输出要点本身。"},
-        {"role": "user", "content": prompt},
-    ], thinking="disabled")
-    return (message.get("content") or "").strip()
+    return _summarize(cfg, prompt, "你是记忆整理助手，把分析笔记压缩成「她对这段关系的理解」要点，只输出要点本身。")
 
 
 def summarize_profile(cfg, lines):
@@ -552,13 +558,7 @@ def summarize_profile(cfg, lines):
         "去掉临时性的活动、当天发生的事、已经过期的状态。用中文写 2-5 句话，不要用列表、不要加标题。\n\n"
         + "\n".join(lines)
     )
-    summary_cfg = dict(cfg)
-    summary_cfg["model"] = "deepseek-flash"
-    message = call_deepseek(summary_cfg, [
-        {"role": "system", "content": "你是记忆整理助手，把早期画像条目压缩成「稳定画像」要点，只输出要点本身。"},
-        {"role": "user", "content": prompt},
-    ], thinking="disabled")
-    return (message.get("content") or "").strip()
+    return _summarize(cfg, prompt, "你是记忆整理助手，把早期画像条目压缩成「稳定画像」要点，只输出要点本身。")
 
 
 def summarize_keyevents(cfg, lines):
@@ -569,13 +569,7 @@ def summarize_keyevents(cfg, lines):
         "用中文写 2-4 句话，不要用列表、不要加标题。\n\n"
         + "\n".join(lines)
     )
-    summary_cfg = dict(cfg)
-    summary_cfg["model"] = "deepseek-flash"
-    message = call_deepseek(summary_cfg, [
-        {"role": "system", "content": "你是记忆整理助手，把早期关键节点合并成精简要点，只输出要点本身。"},
-        {"role": "user", "content": prompt},
-    ], thinking="disabled")
-    return (message.get("content") or "").strip()
+    return _summarize(cfg, prompt, "你是记忆整理助手，把早期关键节点合并成精简要点，只输出要点本身。")
 
 
 def compress_old_history(cfg):
@@ -588,7 +582,7 @@ def compress_old_history(cfg):
             entries = _history_entries(text)
             if not entries:
                 return
-            cutoff = (datetime.now() - timedelta(days=KEEP_DAYS)).strftime("%Y-%m-%d")
+            cutoff = (datetime.now() - timedelta(days=cfg.get("keep_days", KEEP_DAYS))).strftime("%Y-%m-%d")
             old_lines = [line for (d, line) in entries if d < cutoff]
         if not old_lines:
             return
@@ -802,13 +796,7 @@ def summarize_log_batch(cfg, lines):
         "用中文写 2-5 句话，不要用列表、不要加标题。\n\n"
         + "\n".join(lines)
     )
-    summary_cfg = dict(cfg)
-    summary_cfg["model"] = "deepseek-flash"
-    message = call_deepseek(summary_cfg, [
-        {"role": "system", "content": "你是记忆整理助手，把聊天记录压缩成关系脉络要点，只输出要点本身。"},
-        {"role": "user", "content": prompt},
-    ], thinking="disabled")
-    return (message.get("content") or "").strip()
+    return _summarize(cfg, prompt, "你是记忆整理助手，把聊天记录压缩成关系脉络要点，只输出要点本身。")
 
 
 def refine_from_log(cfg):
@@ -852,13 +840,7 @@ def summarize_daily_batch(cfg, lines):
         "用中文写 2-4 句话，不要列表、不要标题。\n\n"
         + "\n".join(lines)
     )
-    summary_cfg = dict(cfg)
-    summary_cfg["model"] = "deepseek-flash"
-    message = call_deepseek(summary_cfg, [
-        {"role": "system", "content": "你是记忆整理助手，把生活快照提炼成一段「她的日子」，只输出段落本身。"},
-        {"role": "user", "content": prompt},
-    ], thinking="disabled")
-    return (message.get("content") or "").strip()
+    return _summarize(cfg, prompt, "你是记忆整理助手，把生活快照提炼成一段「她的日子」，只输出段落本身。")
 
 
 def refine_daily_context(cfg):
@@ -937,6 +919,14 @@ def show_notification(title, msg):
     try:
         import ctypes
         ctypes.windll.user32.MessageBoxW(0, msg, title, 0x40)
+        return
+    except Exception:
+        pass
+    # 两种方式都失败：写 notify_fail 日志，不静默吞
+    try:
+        stamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        with open(NOTIFY_FAIL_PATH, "a", encoding="utf-8") as _f:
+            _f.write(f"[{stamp}] [notify_fail] {title}：{_flat(msg)}\n")
     except Exception:
         pass
 
@@ -991,7 +981,7 @@ def try_notify(cfg):
     to_say = state.get("to_say") or []
     if not to_say:
         return  # 防线：没正事不弹
-    if state.get("notify_count_today", 0) >= NOTIFY_DAILY_MAX:
+    if state.get("notify_count_today", 0) >= cfg.get("proactive_max_per_day", NOTIFY_DAILY_MAX):
         return  # 防线：每日上限
     msg = to_say[0]
     show_notification("怡悠", msg)
@@ -1035,7 +1025,7 @@ def background_evolve(cfg):
         except Exception as e:
             print(f"[warn] 关键节点封顶失败：{e}")
         try:
-            cleanup_attachments()
+            cleanup_attachments(cfg)
         except Exception as e:
             print(f"[warn] 附件回收失败：{e}")
         try:
@@ -1136,7 +1126,7 @@ def apply_structured(extracted):
                     continue
                 if start_marker == PROFILE_START:
                     # 画像区只做精确去重（新值文本已出现在旧行里才跳过），不做字符重叠去重：
-                    # 否则「不吃香菜」这类旧值会挡住「爱吃香菜」这类变化（字符重叠高、语义相反）。
+                    # 否则「不吃香菜」这类旧值会挡住「现在吃香菜了」这类变化（字符重叠高、语义相反）。
                     # 少量重复由 MAX_PROFILE_LINES 封顶压缩兜底。
                     if any(s in old for old in existing):
                         continue
@@ -1217,8 +1207,10 @@ def _char_bigrams(text):
     return grams
 
 
-def retrieve_memory(user_msg):
+def retrieve_memory(user_msg, cfg=None):
     """检索式记忆：主记忆（画像/雷区/关键节点/摘要/挑时机）全量喂；对话原文与内部分析从日志读。"""
+    _hist_limit = (cfg or {}).get("retrieve_log_limit", MAX_HISTORY_LINES)
+    _note_limit = (cfg or {}).get("retrieve_note_limit", MAX_NOTE_LINES)
     with MEMORY_LOCK:
         text = read_text(MEMORY_PATH)
 
@@ -1236,22 +1228,35 @@ def retrieve_memory(user_msg):
     hist_lines = conv_lines
     q_grams = _char_bigrams(user_msg)
     _time_hint = any(k in user_msg for k in ("上次", "那天", "之前", "以前", "还记得"))
-    if len(hist_lines) > MAX_HISTORY_LINES:
+    if len(hist_lines) > _hist_limit:
         if _time_hint:
-            hist_lines = hist_lines[-MAX_HISTORY_LINES:]
+            # 模糊指代（“上次说的那个”）：约定/承诺常埋在中段，尾部取会漏。
+            # 优先抽含约定关键词的行，再按时间倒序补足，最后恢复原日志顺序。
+            promise_kw = ("约定", "答应", "承诺", "提醒", "记得", "别忘了", "说好")
+            promise_lines = [ln for ln in hist_lines if any(k in ln for k in promise_kw)]
+            tail = hist_lines[-_hist_limit:]
+            picked = list(promise_lines[-_hist_limit:])
+            for ln in tail:
+                if len(picked) >= _hist_limit:
+                    break
+                if ln not in picked:
+                    picked.append(ln)
+            _order = {ln: i for i, ln in enumerate(hist_lines)}
+            picked.sort(key=lambda ln: _order[ln])
+            hist_lines = picked
         elif q_grams:
             scored = []
             for i, ln in enumerate(hist_lines):
                 overlap = len(q_grams & _char_bigrams(ln))
                 scored.append((overlap, i, ln))
             scored.sort(key=lambda x: (x[0], x[1]), reverse=True)
-            selected = scored[:MAX_HISTORY_LINES]
+            selected = scored[:_hist_limit]
             selected.sort(key=lambda x: x[1])
             hist_lines = [x[2] for x in selected]
     history = "\n".join(hist_lines)
 
-    if len(note_lines) > MAX_NOTE_LINES:
-        notes = "\n".join(note_lines[-MAX_NOTE_LINES:])
+    if len(note_lines) > _note_limit:
+        notes = "\n".join(note_lines[-_note_limit:])
     else:
         notes = "\n".join(note_lines)
 
@@ -1268,12 +1273,32 @@ def retrieve_memory(user_msg):
     ):
         if content and content != "（暂无）":
             blocks.append(f"【{label}】\n{content}")
-    return "\n\n".join(blocks)
+
+    # 遗忘可解释：判定 recall_status（hit / partial / miss），供 build_system 诚实表达 + 诊断统计
+    has_memory = any(c and c != "（暂无）" for c in (profile, summary, taboos, keyevents, deferred, her_days))
+    has_log = bool(hist_lines or note_lines)
+    if has_memory and has_log:
+        recall_status, recall_reason = "hit", "主记忆与日志均有命中"
+    elif has_memory:
+        recall_status, recall_reason = "partial", "仅主记忆命中，无对话原文"
+    elif has_log:
+        recall_status, recall_reason = "partial", "仅日志命中，无主记忆"
+    else:
+        recall_status, recall_reason = "miss", "记忆库为空"
+
+    return {
+        "blocks": "\n\n".join(blocks),
+        "recall_status": recall_status,
+        "recall_reason": recall_reason,
+    }
 
 
 def build_system(cfg, user_msg=""):
     persona = read_text(PERSONA_PATH)
-    memory = retrieve_memory(user_msg)
+    _mem = retrieve_memory(user_msg, cfg) or {}
+    memory = _mem.get("blocks", "")
+    recall_status = _mem.get("recall_status", "hit")
+    recall_reason = _mem.get("recall_reason", "")
     now = datetime.now()
     weekdays = ["一", "二", "三", "四", "五", "六", "日"]
     date_line = now.strftime(f"%Y-%m-%d（星期{weekdays[now.weekday()]}）%H:%M")
@@ -1311,11 +1336,28 @@ def build_system(cfg, user_msg=""):
         "【你的记忆库（已按相关性检索）内容如下，你要基于它延续对话、记住它】",
         memory.strip() or "（记忆库为空，第一次对话）",
         "【记忆的精确性】雷区、承诺、约定、关键节点，严格按记忆库里的原意说，不要脑补、不要改动、不要凭印象重写；其余关于过去细节、时间的事，基于记忆自然回忆即可，不必精确复述。",
+    ]
+    if recall_status in ("miss", "partial"):
+        parts += [
+            "【记忆的诚实】这次检索到的记忆较少（" + recall_reason + "）。如果对方问的是具体的旧细节（某天、某句话、某件事）而你记忆里没有明确记录，就自然地说「这个我记不太清了，你提醒我一下」，禁止编造具体的时间、地点、原话。日常寒暄不触发这条。",
+        ]
+    parts += [
         "",
         "【输出要求】你在思考过程中完成对用户的内部分析（模式识别、历史关联、判断对方状态、是否该挑时机说，这段不会给用户看），",
         "最终回复里只写你要对用户说的话，严格符合人设与规则，不要出现任何分析内容或格式标记。",
         "回复要简短、口语化，像微信聊天：每条回复一句到两三句就停，一个意思拆成几条短消息、中间用空行隔开，不要写成一长段，不要书面腔、不要 AI 味。",
     ]
+    # 遗忘可解释：检索结果写诊断日志（独立文件，不进主记忆），供 diag 统计命中率
+    try:
+        with open(RECALL_STATS_PATH, "a", encoding="utf-8") as _f:
+            _f.write(json.dumps({
+                "time": now.strftime("%Y-%m-%d %H:%M:%S"),
+                "status": recall_status,
+                "reason": recall_reason,
+                "user_len": len(user_msg or ""),
+            }, ensure_ascii=False) + "\n")
+    except Exception:
+        pass
     return "\n".join(parts)
 
 
@@ -1406,26 +1448,33 @@ class Handler(BaseHTTPRequestHandler):
             self._send(500, json.dumps({"error": "尚未配置 API Key，请在 config.json 里填入。"}, ensure_ascii=False))
             return
 
-        # 先取最后一条用户消息，用于检索记忆；同时取它带的图片（data URL）和原文件名
+        # 先取最后一条用户消息，用于检索记忆；同时取它带的图片（data URL 数组）和原文件名
         user_msg = ""
-        user_image = None
-        user_file_name = ""
+        user_images = []
+        user_file_names = []
         for m in reversed(messages):
             if m.get("role") == "user":
                 user_msg = m.get("content", "")
-                user_image = m.get("image") or None
-                user_file_name = m.get("fileName") or ""
+                # 兼容旧格式 image（单个）与新格式 images（数组），最多 5 张
+                _imgs = m.get("images") or ([m.get("image")] if m.get("image") else [])
+                _names = m.get("fileNames") or ([m.get("fileName")] if m.get("fileName") else [])
+                user_images = [x for x in _imgs if x][:5]
+                user_file_names = [str(x) for x in _names if x][:5]
                 break
 
         system_msg = build_system(cfg, user_msg)
 
-        # 图片分享：把用户发的图片（base64 data URL）存盘，得到服务端 URL
-        attach_url = None
-        attach_name = None
-        if user_image and str(user_image).startswith("data:image/"):
-            attach_url, attach_name = save_attachment(user_image)
-            if not attach_url:
-                print("[warn] 图片存盘失败（类型或大小不符）")
+        # 图片分享：把用户发的图片（base64 data URL）逐张存盘，失败项单独跳过
+        attach_urls = []
+        attach_names = []
+        for _img in user_images:
+            if _img and str(_img).startswith("data:image/"):
+                _url, _name = save_attachment(_img)
+                if _url:
+                    attach_urls.append(_url)
+                    attach_names.append(_name)
+                else:
+                    print("[warn] 某张图片存盘失败（类型或大小不符）")
 
         # 空 messages = 刚打开窗口，让怡悠主动开场问候
         if not messages:
@@ -1459,15 +1508,17 @@ class Handler(BaseHTTPRequestHandler):
                 {"role": m.get("role"), "content": m.get("content", "")}
                 for m in load_session()
             ]
-            # 把带图片的 user 消息转成多模态 content（数组），图片以 image_url 块喂给视觉
+            # 把带图片的 user 消息转成多模态 content（数组），每张图一个 image_url 块喂给视觉
             api_chat = []
             for m in messages:
                 role = m.get("role")
                 content = m.get("content", "")
-                img = m.get("image")
-                if role == "user" and img and str(img).startswith("data:image/"):
-                    blocks = [{"type": "text", "text": content or "（对方发了一张图片）"}]
-                    blocks.append({"type": "image_url", "image_url": {"url": img, "detail": IMAGE_DETAIL}})
+                _imgs = m.get("images") or ([m.get("image")] if m.get("image") else [])
+                _imgs = [x for x in _imgs if x and str(x).startswith("data:image/")]
+                if role == "user" and _imgs:
+                    blocks = [{"type": "text", "text": content or ("（对方发了 %d 张图片）" % len(_imgs))}]
+                    for im in _imgs:
+                        blocks.append({"type": "image_url", "image_url": {"url": im, "detail": IMAGE_DETAIL}})
                     api_chat.append({"role": "user", "content": blocks})
                 else:
                     api_chat.append({"role": role, "content": content})
@@ -1490,10 +1541,17 @@ class Handler(BaseHTTPRequestHandler):
             except Exception:
                 pass
 
+        # 开场白去重（P1-7）：连续重启不雷同
+        if not messages and reply and not _is_fallback(reply):
+            reply = _dedupe_opening(cfg, system_msg, reply)
+
         if user_msg and reply and not _is_fallback(reply):
             # 图片分享进记忆：日志里记「[分享图片] 原文件名」+ 文字，供提炼进主记忆
-            if attach_url:
-                img_note = "[分享图片] " + (user_file_name or (attach_name or "图片"))
+            if attach_urls:
+                if user_file_names:
+                    img_note = "[分享图片] " + "、".join(user_file_names)
+                else:
+                    img_note = "[分享图片] %d 张图片" % len(attach_urls)
                 memory_msg = (user_msg + "（" + img_note + "）") if user_msg else img_note
             else:
                 memory_msg = user_msg
@@ -1520,9 +1578,9 @@ class Handler(BaseHTTPRequestHandler):
         # 会话延续：把这一轮追加进 session.json（界面回显）。开场白只记怡悠的话，正常轮记双方。
         if reply and not _is_fallback(reply):
             try:
-                if user_msg or attach_url:
-                    _sess_content = user_msg if user_msg else ("[图片]" if attach_url else "")
-                    append_session("user", _sess_content, image=attach_url)
+                if user_msg or attach_urls:
+                    _sess_content = user_msg if user_msg else ("[图片]" if attach_urls else "")
+                    append_session("user", _sess_content, images=attach_urls)
                 append_session("assistant", reply)
             except Exception as e:
                 print(f"[warn] 会话写入失败：{e}")

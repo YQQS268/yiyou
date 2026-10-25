@@ -1,8 +1,5 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-# 怡悠（yiyou）· AI 恋人陪伴智能体 · 情感系统模块
-# Copyright (c) 2026 YQQS268
-# 许可：个人/非商业使用，详见 LICENSE。
 """
 怡悠 · 情感系统模块（独立模块，之后与其他模块合并）
 
@@ -262,6 +259,9 @@ def _gen_one_say(cfg, items):
 def generate_to_say(cfg):
     """生成待说的话：约定提醒（reminders，穿透一切限制）优先，其次普通未了心事（pending）。生成后逐条消费，避免重启重复发。"""
     state = load_state()
+    # 上一条已弹出但用户还没打开页面消费（pending_said 非空），不生成新的，避免连弹
+    if state.get("pending_said"):
+        return state
     # 约定提醒：用户明确要求主动提醒/说的事，穿透一切限制
     reminders = state.get("reminders") or []
     if reminders and not state.get("to_say_reminder"):

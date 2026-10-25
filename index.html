@@ -1,5 +1,4 @@
 <!DOCTYPE html>
-<!-- 怡悠（yiyou）· AI 恋人陪伴智能体 · Copyright (c) 2026 YQQS268 · 个人/非商业使用许可，详见 LICENSE -->
 <html lang="zh-CN">
 <head>
 <meta charset="UTF-8">
@@ -118,11 +117,33 @@
     background: #f7f7f7;
     border-top: 1px solid #d9d9d9;
   }
-  .img-preview img {
+  #imgPreviewList {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    flex: 1;
+    overflow-x: auto;
+  }
+  .thumb-item { position: relative; }
+  .thumb-item img {
     height: 56px;
     border-radius: 4px;
+    display: block;
   }
-  .img-preview button {
+  .thumb-item .thumb-del {
+    position: absolute;
+    top: -6px;
+    right: -6px;
+    border: none;
+    background: #e0e0e0;
+    border-radius: 50%;
+    width: 20px;
+    height: 20px;
+    cursor: pointer;
+    line-height: 1;
+    font-size: 13px;
+  }
+  #imgPreviewClear {
     border: none;
     background: #e0e0e0;
     border-radius: 50%;
@@ -188,7 +209,7 @@
   <div class="messages" id="messages"></div>
 
   <div class="img-preview" id="imgPreview" style="display:none">
-    <img id="imgPreviewThumb" alt="待发送图片">
+    <div id="imgPreviewList"></div>
     <button id="imgPreviewClear" type="button">×</button>
   </div>
 
@@ -206,11 +227,35 @@
   const imgBtn = document.getElementById('imgBtn');
   const imgInput = document.getElementById('imgInput');
   const imgPreview = document.getElementById('imgPreview');
-  const imgPreviewThumb = document.getElementById('imgPreviewThumb');
+  const imgPreviewList = document.getElementById('imgPreviewList');
   const imgPreviewClear = document.getElementById('imgPreviewClear');
 
-  // 待发送的图片（选图后暂存，点发送时随消息一起发）
-  let pendingImage = null; // { dataUrl, name }
+  // 待发送的图片（选图后暂存，点发送时随消息一起发），最多 5 张
+  let pendingImages = []; // [{ dataUrl, name }]
+
+  // 渲染待发送图片缩略图列表，每张可单独删除
+  function renderThumbs() {
+    imgPreviewList.innerHTML = '';
+    pendingImages.forEach((img, idx) => {
+      const item = document.createElement('div');
+      item.className = 'thumb-item';
+      const im = document.createElement('img');
+      im.src = img.dataUrl;
+      im.alt = '';
+      const del = document.createElement('button');
+      del.className = 'thumb-del';
+      del.type = 'button';
+      del.textContent = '×';
+      del.addEventListener('click', () => {
+        pendingImages.splice(idx, 1);
+        renderThumbs();
+      });
+      item.appendChild(im);
+      item.appendChild(del);
+      imgPreviewList.appendChild(item);
+    });
+    imgPreview.style.display = pendingImages.length > 0 ? 'flex' : 'none';
+  }
 
   // 会话状态在后端 session.json，前端不再自己维护 messages 数组
 
@@ -363,15 +408,14 @@
 
   async function onSend() {
     const text = inputEl.value.trim();
-    const img = pendingImage;
-    if (!text && !img) return;
+    const imgs = pendingImages.slice();
+    if (!text && imgs.length === 0) return;
     inputEl.value = '';
-    pendingImage = null;
-    imgPreview.style.display = 'none';
-    imgPreviewThumb.src = '';
-    // 本地先显示：图片单独一个气泡，文字走逗号拆多条气泡（图+文时只在文字气泡显示时间）
-    if (img) {
-      addBubble('user', '', !text, null, img.dataUrl);
+    pendingImages = [];
+    renderThumbs();
+    // 本地先显示：每张图片单独一个气泡，文字走逗号拆多条气泡（图+文时只在最后显示时间）
+    if (imgs.length > 0) {
+      imgs.forEach((img, i) => addBubble('user', '', !text && i === imgs.length - 1, null, img.dataUrl));
     }
     if (text) {
       addUserReply(text);
@@ -380,9 +424,9 @@
     showTyping();
     try {
       const msg = { role: 'user', content: text };
-      if (img) {
-        msg.image = img.dataUrl;
-        msg.fileName = img.name;
+      if (imgs.length > 0) {
+        msg.images = imgs.map(i => i.dataUrl);
+        msg.fileNames = imgs.map(i => i.name);
       }
       // 只发这一条新消息，历史上下文由后端从 session.json 拼接
       const reply = await sendChat([msg]);
@@ -449,6 +493,10 @@
     const file = imgInput.files[0];
     imgInput.value = '';
     if (!file) return;
+    if (pendingImages.length >= 5) {
+      addBubble('yiyou', '（一次最多发 5 张图片）');
+      return;
+    }
     if (['image/jpeg', 'image/png', 'image/gif', 'image/webp'].indexOf(file.type) === -1) {
       addBubble('yiyou', '（只支持 jpg / png / gif / webp 图片）');
       return;
@@ -457,17 +505,15 @@
       const dataUrl = (file.type === 'image/gif')
         ? await readFileAsDataUrl(file)
         : await compressImage(file, 1600);
-      pendingImage = { dataUrl, name: file.name };
-      imgPreviewThumb.src = dataUrl;
-      imgPreview.style.display = 'flex';
+      pendingImages.push({ dataUrl, name: file.name });
+      renderThumbs();
     } catch (err) {
       addBubble('yiyou', '（图片读取失败：' + err.message + '）');
     }
   });
   imgPreviewClear.addEventListener('click', () => {
-    pendingImage = null;
-    imgPreviewThumb.src = '';
-    imgPreview.style.display = 'none';
+    pendingImages = [];
+    renderThumbs();
   });
 
   // 拉取当前会话（后端 session.json）
@@ -487,9 +533,10 @@
     for (const m of msgs) {
       const t = m.time ? m.time.slice(11, 16) : null;
       if (m.role === 'user') {
-        if (m.image) {
+        const imgs = m.images || (m.image ? [m.image] : []);
+        if (imgs.length > 0) {
           const hasText = m.content && m.content !== '[图片]';
-          addBubble('user', '', !hasText, t, m.image);
+          imgs.forEach((img, i) => addBubble('user', '', !hasText && i === imgs.length - 1, t, img));
           if (hasText) addUserReply(m.content, t);
         } else {
           addUserReply(m.content, t);
