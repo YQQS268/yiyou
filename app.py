@@ -1134,8 +1134,15 @@ def apply_structured(extracted):
                 s = _flat(x)
                 if not s:
                     continue
-                if any(_char_overlap(s, old) >= 0.7 for old in existing):
-                    continue
+                if start_marker == PROFILE_START:
+                    # 画像区只做精确去重（新值文本已出现在旧行里才跳过），不做字符重叠去重：
+                    # 否则「不吃香菜」这类旧值会挡住「爱吃香菜」这类变化（字符重叠高、语义相反）。
+                    # 少量重复由 MAX_PROFILE_LINES 封顶压缩兜底。
+                    if any(s in old for old in existing):
+                        continue
+                else:
+                    if any(_char_overlap(s, old) >= 0.7 for old in existing):
+                        continue
                 new_items.append(s)
             if not new_items:
                 continue
