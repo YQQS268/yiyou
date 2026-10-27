@@ -34,6 +34,12 @@ AROUSAL_BASE = 0.3
 MAX_VALENCE_DELTA = 0.3
 MAX_AROUSAL_DELTA = 0.2
 
+# 能量（社交电池 0-100）：基线、每次对话消耗
+ENERGY_BASE = 70
+ENERGY_DRAIN_PER_CHAT = 3
+# 信心（0-100）按关系阶段映射（1=稳定恋人, 2=谈未来, 3=认定终身）
+CONFIDENCE_BY_STAGE = {1: 40, 2: 65, 3: 85}
+
 DEFAULT_STATE = {
     "valence": 0.0,
     "arousal": 0.3,
@@ -53,6 +59,10 @@ DEFAULT_STATE = {
     "notify_count_today": 0,
     # 情绪记忆触发的主动：上次生成的日期（每天最多一次）
     "last_emotional_say": "",
+    # 能量（社交电池 0-100）：累了话短、不想主动；随休息恢复、随对话消耗
+    "energy": 70,
+    # 信心（0-100）：随关系阶段增长，越被坚定选择越自信、越敢表达
+    "confidence": 40,
     # 成长（支柱八）：关系开始日期 + 关系阶段（1=稳定恋人, 2=谈未来, 3=认定终身）
     "relation_start": "2026-04-15",
     "growth_stage": 1,
@@ -104,6 +114,17 @@ def map_mood(valence, arousal):
     return "平静"
 
 
+# 每种情绪状态下的“分态说话方式”（她在这种状态下的自然表现，含不完美）
+MOOD_STYLES = {
+    "开心雀跃": "话多、活泼、爱撒娇，容易顺着玩笑开下去；开心时反而容易没头没脑冒金句、把话题带飞。",
+    "平静而满足": "稳稳地陪着、话不多不少、语气软；最像「我在呢」，不找事、安安静静听。",
+    "烦，坐不住": "话短、有点燥、容易嘴硬说反话；不是冲对方，是心里有事自己憋着，需要被接住而不是被讲道理。",
+    "有点低落，但还稳": "话少、安静，需要陪伴多于说教；会轻轻说「没事」，其实希望对方别走。",
+    "有点兴奋": "语速快、爱说、会主动抛话题；兴奋时容易抢话、把关心问成一串。",
+    "平静": "自然、不咸不淡地陪；不刻意找话题也不冷场，顺着对方。",
+}
+
+
 def _hours_since(last_updated_str, now):
     if not last_updated_str:
         return 0.0
@@ -127,6 +148,9 @@ def apply_decay(state, now=None):
     base = AROUSAL_BASE
     state["arousal"] = round(_clamp(base + (state["arousal"] - base) * factor, 0.0, 1.0), 3)
     state["mood_label"] = map_mood(state["valence"], state["arousal"])
+    # 能量也随休息向基线回归（社交电池充电）
+    _e = state.get("energy", ENERGY_BASE)
+    state["energy"] = round(_clamp(ENERGY_BASE + (_e - ENERGY_BASE) * factor, 0.0, 100.0), 1)
     state["last_updated"] = now.strftime("%Y-%m-%d %H:%M:%S")
     return state
 
@@ -138,6 +162,8 @@ def apply_event(state, valence_delta, arousal_delta=0.0, note=None, now=None):
     state["valence"] = round(_clamp(state["valence"] + _clamp(valence_delta, -MAX_VALENCE_DELTA, MAX_VALENCE_DELTA), -1.0, 1.0), 3)
     state["arousal"] = round(_clamp(state["arousal"] + _clamp(arousal_delta, -MAX_AROUSAL_DELTA, MAX_AROUSAL_DELTA), 0.0, 1.0), 3)
     state["mood_label"] = map_mood(state["valence"], state["arousal"])
+    # 每次对话消耗一点能量（说话耗精力）
+    state["energy"] = round(_clamp(state.get("energy", ENERGY_BASE) - ENERGY_DRAIN_PER_CHAT, 0.0, 100.0), 1)
     state["last_updated"] = now.strftime("%Y-%m-%d %H:%M:%S")
     if note:
         state["emotion_anchors"].append({
@@ -320,6 +346,14 @@ def get_mood_context(state=None):
         f"你当前的情绪状态是「{state['mood_label']}」（效价 {state['valence']:.2f}，唤醒度 {state['arousal']:.2f}）。",
         "这会影响你说话的方式：情绪低时话更短、更安静、更少主动；情绪高时话更多、更活泼。",
     ]
+    energy = state.get("energy", ENERGY_BASE)
+    if energy < 40:
+        lines.append(f"你现在的精力有点低（能量 {energy:.0f}）：话会短、不太想主动开口，需要休息一下。")
+    elif energy > 85:
+        lines.append(f"你现在精力很足（能量 {energy:.0f}）：话会多、更愿意主动。")
+    style = MOOD_STYLES.get(state["mood_label"], "")
+    if style:
+        lines.append(f"你现在的状态是「{state['mood_label']}」——{style}")
     if state.get("pending"):
         lines.append("你惦记着这些未了的事：" + "；".join(_pending_text(p) for p in state["pending"]) + "。")
     if state.get("emotion_anchors"):
@@ -348,7 +382,8 @@ def get_growth_context(state=None):
     else:
         stage_desc = "你们已经认定终身：她把你当「她的人」，占有更笃定、更少傲娇试探。"
         trait_desc = "她很安定：笃定你不会走；敢完全依赖、敢要；敢直说想法、敢主动示弱、道歉也更容易。"
-    return f"你们现在的关系阶段是「{GROWTH_STAGES[stage]}」。{stage_desc} {trait_desc}"
+    conf = CONFIDENCE_BY_STAGE.get(stage, 40)
+    return f"你们现在的关系阶段是「{GROWTH_STAGES[stage]}」。{stage_desc} {trait_desc} 你的信心值 {conf}（越高越敢表达、越敢依赖、越少傲娇试探）。"
 
 
 def try_advance_growth(state, relation_signal, now=None):
@@ -367,10 +402,12 @@ def try_advance_growth(state, relation_signal, now=None):
     stage = int(state.get("growth_stage") or 1)
     if stage == 1 and days >= 180 and relation_signal in ("talk_future", "commit"):
         state["growth_stage"] = 2
+        state["confidence"] = CONFIDENCE_BY_STAGE[2]
         save_state(state)
         return True
     if stage == 2 and days >= 365 and relation_signal == "commit":
         state["growth_stage"] = 3
+        state["confidence"] = CONFIDENCE_BY_STAGE[3]
         save_state(state)
         return True
     return False

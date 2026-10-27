@@ -81,6 +81,8 @@ HER_DAYS_START = "<!-- HER_DAYS_START -->"
 HER_DAYS_END = "<!-- HER_DAYS_END -->"
 EMOTIONS_START = "<!-- EMOTIONS_START -->"
 EMOTIONS_END = "<!-- EMOTIONS_END -->"
+REL_EVENTS_START = "<!-- REL_EVENTS_START -->"
+REL_EVENTS_END = "<!-- REL_EVENTS_END -->"
 
 # 情绪记忆封顶：超过 MAX_EMOTION_LINES 条时，把最早的压成一条（保留最近 KEEP_RECENT_EMOTIONS 条）
 MAX_EMOTION_LINES = 30
@@ -1023,10 +1025,12 @@ def try_notify(cfg):
         emotion.save_state(state)
         return
 
-    # 普通待说的话：只看每天次数（删除时间冷却与深夜限制）
+    # 普通待说的话：只看每天次数（删除时间冷却与深夜限制）；能量太低也不主动（累了不硬聊，约定提醒仍穿透）
     to_say = state.get("to_say") or []
     if not to_say:
         return  # 防线：没正事不弹
+    if float(state.get("energy", 70)) < 30:
+        return  # 防线：能量太低，不主动
     if state.get("notify_count_today", 0) >= cfg.get("proactive_max_per_day", NOTIFY_DAILY_MAX):
         return  # 防线：每日上限
     msg = to_say[0]
@@ -1179,6 +1183,7 @@ def extract_structured(cfg, user_msg, reply):
         '"deferred": ["挑时机再说的话：怡悠看出来了但觉得现在直说会起反效果、想以后挑时机再说的分析"], '
         '"pending": ["未了心事：对方承诺过或说过会做、但还没兑现或还没下文的事（例如「结果出来告诉你」「忙完就找你」「下次带你去」），怡悠会惦记着、之后想主动追问的"], '
         '"reminders": ["约定提醒：用户明确要求「怡悠要主动提醒/主动说」的事（例如「睡前和我说晚安」「到点了提醒我」「记得催我」），这是用户对怡悠的明确授权，要优先兑现"], '
+        '"relationship_events": ["关系事件：两人关系状态的变化（吵架/和好/复合/冷战/确定关系/重要关系节点），值得长期记住的，用第三人称描述"], '
         '"relation_signal": "关系升级表态：用户本轮是否明确说了让关系更进一步的话——talk_future=聊到未来/小家/攒钱/一直在一起；commit=明确认定（这辈子/娶你/认定你）；没有则为空字符串", '
         '"city": "用户所在城市，仅当本轮明确提到新城市时填，否则为空字符串"}\n\n'
         "判定要点：\n"
@@ -1225,6 +1230,8 @@ def extract_structured(cfg, user_msg, reply):
         result["key_events"] = norm_ke
         result["city"] = str(result.get("city") or "").strip()
         result["relation_signal"] = str(result.get("relation_signal") or "").strip()
+        _re = result.get("relationship_events") or []
+        result["relationship_events"] = [str(x).strip() for x in _re if str(x).strip()] if isinstance(_re, list) else []
         return result
     except Exception:
         return None
@@ -1254,6 +1261,7 @@ def apply_structured(extracted):
             (TABOOS_START, TABOOS_END, extracted.get("taboos")),
             (KEYEVENTS_START, KEYEVENTS_END, extracted.get("key_events")),
             (DEFERRED_START, DEFERRED_END, extracted.get("deferred")),
+            (REL_EVENTS_START, REL_EVENTS_END, extracted.get("relationship_events")),
         )
         for start_marker, end_marker, items in sections:
             if not items:
@@ -1380,6 +1388,7 @@ def retrieve_memory(user_msg, cfg=None):
     deferred = _region(text, DEFERRED_START, DEFERRED_END)
     her_days = _region(text, HER_DAYS_START, HER_DAYS_END)
     emotions = _region(text, EMOTIONS_START, EMOTIONS_END)
+    rel_events = _region(text, REL_EVENTS_START, REL_EVENTS_END)
 
     log_lines = _read_log_lines()
     conv_lines = [ln for ln in log_lines if ("用户：" in ln or "怡悠：" in ln)]
@@ -1428,6 +1437,7 @@ def retrieve_memory(user_msg, cfg=None):
         ("挑时机再说的话", deferred),
         ("她的日子", her_days),
         ("情绪记忆（她当时的感受）", emotions),
+        ("关系事件（你们之间的重要变化）", rel_events),
         ("早期记忆摘要", summary),
         ("对话历史", history),
         ("内部分析笔记（最近）", notes),
