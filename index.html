@@ -342,13 +342,29 @@
     parts.forEach((p, i) => addBubble('yiyou', p, i === parts.length - 1, time));
   }
 
-  // 用户的消息也按标点拆成多条短气泡（像微信连发），不再一问一答
+  // 末尾带 // 表示"整条一个气泡"，不按标点拆；返回剥离后的文本与标记
+  function detectWholeMark(text) {
+    const s = String(text || '');
+    const t = s.trimEnd();
+    if (t.endsWith('//')) {
+      return { text: t.slice(0, -2).trimEnd(), whole: true };
+    }
+    return { text: s, whole: false };
+  }
+
+  // 用户的消息按标点拆成多条短气泡（像微信连发）；末尾带 // 则整条一个气泡
   function addUserReply(text, time = null) {
-    const parts = String(text || '')
-      .replace(/([，。！？!?…])/g, '$1\u0001')
-      .split('\u0001')
-      .map(s => s.trim())
-      .filter(Boolean);
+    const d = detectWholeMark(text);
+    let parts;
+    if (d.whole) {
+      parts = d.text ? [d.text] : [];
+    } else {
+      parts = d.text
+        .replace(/([，。！？!?…])/g, '$1\u0001')
+        .split('\u0001')
+        .map(s => s.trim())
+        .filter(Boolean);
+    }
     if (parts.length === 0) return;
     parts.forEach((p, i) => addBubble('user', p, i === parts.length - 1, time));
   }
@@ -423,7 +439,7 @@
     sendBtn.disabled = true;
     showTyping();
     try {
-      const msg = { role: 'user', content: text };
+      const msg = { role: 'user', content: detectWholeMark(text).text };
       if (imgs.length > 0) {
         msg.images = imgs.map(i => i.dataUrl);
         msg.fileNames = imgs.map(i => i.name);
