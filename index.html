@@ -360,7 +360,8 @@
       parts = d.text ? [d.text] : [];
     } else {
       parts = d.text
-        .replace(/([，。！？!?…])/g, '$1\u0001')
+        .replace(/[，,]/g, '\u0001')
+        .replace(/([。！？!?…]+)/g, '$1\u0001')
         .split('\u0001')
         .map(s => s.trim())
         .filter(Boolean);
