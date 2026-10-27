@@ -1,4 +1,4 @@
-# 怡悠（yiyou）v1.1.0
+# 怡悠（yiyou）v1.2.0
 
 怡悠是一个跑在本地的 AI 恋人陪伴智能体：微信风格的网页聊天界面 + 纯 Python 标准库后端 + 云端大模型大脑。所有记忆、聊天记录和情感状态都只存在你自己的电脑上。
 
@@ -51,9 +51,13 @@
 - 微信式聊天界面（index.html，单文件，无任何前端依赖）
 - 纯 Python 标准库后端（app.py），零第三方依赖，Python 3.9+ 即可运行
 - 云端大脑默认使用 DeepSeek API（deepseek-flash），可换成兼容 OpenAI 协议的其他模型
+- 图片分享：一次最多连发 5 张图（jpg/png/gif/webp），视觉模型按原图读取，图片信息进记忆日志
 - 情感模块（emotion.py）：跨时间的情绪状态（效价-唤醒度二维模型），有来由、有惯性、会衰减
-- 两文件记忆系统：append-only 聊天日志（yiyou.log.md）+ 提炼后的长期记忆（yiyou.md），自动提炼、自动遗忘、防失真
-- 主动陪伴：打开界面时主动打招呼，可配置桌面通知提醒
+- 记忆系统：append-only 聊天日志 + 提炼后的长期记忆，自动提炼、自动遗忘、防失真；关键事件按 minor/landmark/major 分级，人生节点长期保留
+- 诚实记忆：检索不到旧细节时，怡悠会说“记不太清”而不是编造；生活小约定超 10 天无下文自动过期
+- 主动陪伴：打开界面时主动打招呼（连续重启不重复开场白），可配置桌面通知提醒
+- 一键健康检查：diag.py 只读生成诊断报告，看记忆体量、关键节点保留率、检索命中率等
+- 可配置参数：记忆保留天数、附件保留天数、主动频率、检索条数等可改 config.json，无需动代码
 - 人格完全由 persona.md 定义，想让她是什么样的人，改这个文件就行
 
 ## 目录结构
@@ -62,6 +66,7 @@
 
 - `app.py` —— 后端主程序（HTTP 服务 + 聊天 + 记忆提炼 + 主动问候）
 - `emotion.py` —— 情感模块（情绪状态模型）
+- `diag.py` —— 记忆健康检查（只读，一键生成诊断报告）
 - `index.html` —— 聊天界面
 - `persona.md` —— 人设模板，改成你想要的样子
 - `config.example.json` —— 配置模板，复制为 `config.json` 使用
@@ -75,7 +80,8 @@
 - `config.json` —— 你的 API Key
 - `yiyou.md`、`yiyou.log.md`、`yiyou.backup.md`、`backup/` —— 她的记忆与聊天记录
 - `state.json` —— 情感状态
-- `parse_errors.log` —— 解析错误日志
+- `session.json`、`attachments/` —— 会话状态与收到的图片
+- `parse_errors.log`、`recall_stats.log`、`notify_fail.log`、`diag_report.md` —— 各类运行日志与诊断报告
 
 ## 隐私与信任
 
