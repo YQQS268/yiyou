@@ -51,6 +51,8 @@ DEFAULT_STATE = {
     "last_notify": None,
     "notify_date": None,
     "notify_count_today": 0,
+    # 情绪记忆触发的主动：上次生成的日期（每天最多一次）
+    "last_emotional_say": "",
     # 成长（支柱八）：关系开始日期 + 关系阶段（1=稳定恋人, 2=谈未来, 3=认定终身）
     "relation_start": "2026-04-15",
     "growth_stage": 1,

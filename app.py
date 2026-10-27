@@ -86,6 +86,9 @@ EMOTIONS_END = "<!-- EMOTIONS_END -->"
 MAX_EMOTION_LINES = 30
 KEEP_RECENT_EMOTIONS = 20
 
+# 情绪记忆触发的主动：距离上次对话至少多少小时才可能触发（安静下来才想起，不是到点打卡）
+EMOTIONAL_SAY_MIN_GAP_HOURS = 2
+
 # 记忆压缩：保留最近多少天的对话原文，更早的用模型压缩成摘要（原文不再归档）
 KEEP_DAYS = 7
 
@@ -1032,6 +1035,94 @@ def try_notify(cfg):
     emotion.save_state(state)
 
 
+def _hours_since_last_chat():
+    """距最后一轮对话（日志里最后一条用户/怡悠消息）的小时数；无日志返回一个大数。"""
+    try:
+        tail = _read_log_lines()
+        for ln in reversed(tail):
+            if "用户：" in ln or "怡悠：" in ln:
+                m = re.match(r"^\[(\d{4}-\d{2}-\d{2}) (\d{2}):(\d{2})\]", ln)
+                if m:
+                    dt = datetime.strptime(f"{m.group(1)} {m.group(2)}", "%Y-%m-%d %H:%M")
+                    return (datetime.now() - dt).total_seconds() / 3600.0
+    except Exception:
+        pass
+    return 999.0
+
+
+def _gen_emotional_say(cfg, emotion_line, daily):
+    """基于一段温暖回忆 + 当下的生活，生成一句主动想说的话（确认连接/分享当下）。失败返回 None。"""
+    prompt = (
+        "你是怡悠。现在是你主动想对对方说一句话（不是回复，是你自己先开口）。\n"
+        f"你刚刚想起这样一段温暖的回忆：{emotion_line}\n"
+        f"你此刻的生活状态：{daily}\n\n"
+        "要求：\n"
+        "- 简短、口语化、像微信聊天，一句到两句就停。\n"
+        "- 要有具体的东西（那段回忆里的小细节、或你现在在做的小事），不要空泛的「想你了」「在吗」。\n"
+        "- 语气自然，是你安静下来想起他、想确认那份安心还在的感觉，不是打卡、不是查岗、不是有事要问。\n"
+        "- 只输出这句话本身，不要任何解释、引号或前缀。\n"
+    )
+    payload = {
+        "model": "deepseek-flash",
+        "messages": [
+            {"role": "system", "content": "你是怡悠，一个暖、傲娇有度、嘴硬心软的恋人。"},
+            {"role": "user", "content": prompt},
+        ],
+        "thinking": {"type": "disabled"},
+        "stream": False,
+    }
+    url = cfg["base_url"].rstrip("/") + "/chat/completions"
+    data = json.dumps(payload).encode("utf-8")
+    req = urllib.request.Request(url, data=data, method="POST")
+    req.add_header("Content-Type", "application/json")
+    req.add_header("Authorization", "Bearer " + cfg["api_key"])
+    try:
+        with urllib.request.urlopen(req, timeout=60) as resp:
+            body = json.loads(resp.read().decode("utf-8"))
+        content = (body["choices"][0]["message"].get("content") or "").strip()
+        return content or None
+    except Exception:
+        return None
+
+
+def generate_emotional_say(cfg):
+    """情绪记忆触发的主动：没正事可说时，偶尔主动分享一段温暖回忆（确认连接）。
+
+    克制：每天最多一次、情绪不低落、距离上次对话够久、上一条主动没消费时不生成新的。
+    """
+    try:
+        st = emotion.load_state()
+        if st.get("pending_said"):
+            return
+        if st.get("to_say_reminder") or st.get("to_say"):
+            return
+        today = datetime.now().strftime("%Y-%m-%d")
+        if st.get("last_emotional_say") == today:
+            return
+        valence = float(st.get("valence") or 0.0)
+        if valence < -0.1:
+            return
+        if _hours_since_last_chat() < EMOTIONAL_SAY_MIN_GAP_HOURS:
+            return
+        with MEMORY_LOCK:
+            text = read_text(MEMORY_PATH)
+        region = _region(text, EMOTIONS_START, EMOTIONS_END)
+        warm = [ln for ln in region.splitlines() if "[暖]" in ln]
+        if not warm:
+            return
+        emotion_line = warm[-1].strip()
+        daily = emotion.get_daily_context(cfg=cfg) or "今天和平常一样，没什么特别的。"
+        msg = _gen_emotional_say(cfg, emotion_line, daily)
+        if not msg:
+            return
+        st = emotion.load_state()  # 重新读，避免覆盖 get_daily_context 的生活快照更新
+        st["to_say"] = (st.get("to_say") or []) + [msg]
+        st["last_emotional_say"] = today
+        emotion.save_state(st)
+    except Exception as e:
+        print(f"[warn] 情绪主动生成失败：{e}")
+
+
 def background_evolve(cfg):
     """后台演化线程：定时做情绪稳态回归 + 记忆压缩调度（解决 #5）。"""
     while True:
@@ -1064,8 +1155,9 @@ def background_evolve(cfg):
         except Exception as e:
             print(f"[warn] 附件回收失败：{e}")
         try:
-            # 主动发信息：克制生成待说的话 + 五道防线过滤后通知
+            # 主动发信息：克制生成待说的话 + 情绪记忆主动 + 五道防线过滤后通知
             emotion.generate_to_say(cfg)
+            generate_emotional_say(cfg)
             try_notify(cfg)
         except Exception as e:
             print(f"[warn] 主动发信息失败：{e}")
