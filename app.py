@@ -410,6 +410,48 @@ def _flat(s):
     return s.replace("\r", " ").replace("\n", " ").strip()
 
 
+def _dedupe_opening(cfg, system_msg, reply):
+    """开场白去重（P1-7）：recent_openers 存最近 5 条，首 10 字相同则重新生成。
+
+    返回（可能已重新生成的）开场白。
+    """
+    if not reply or _is_fallback(reply):
+        return reply
+    _state = emotion.load_state()
+    recent = _state.get("recent_openers") or []
+    recent = [x for x in recent if isinstance(x, str) and x.strip()]
+
+    def _head(s):
+        return _flat(s)[:10]
+
+    cur_head = _head(reply)
+    # 首 10 字与最近任一条相同 → 换一个说法（最多重试 3 次）
+    if cur_head and any(_head(x) == cur_head for x in recent):
+        for _ in range(3):
+            try:
+                msg = call_deepseek(
+                    cfg,
+                    [
+                        {"role": "system", "content": system_msg},
+                        {"role": "user", "content": "你刚才的开场白和最近几次太像了，换个不一样的说法，自然一点，别重复之前的句子。"},
+                    ],
+                    thinking="enabled",
+                )
+                _a, _r = parse_reply(msg)
+            except Exception:
+                break
+            if _r and not _is_fallback(_r) and _head(_r) != cur_head:
+                reply = _r
+                cur_head = _head(reply)
+                break
+
+    # 记下这次的开场白（只保留最近 5 条），供下次比对
+    recent.append(reply)
+    _state["recent_openers"] = recent[-5:]
+    emotion.save_state(_state)
+    return reply
+
+
 def insert_between(text, start_marker, end_marker, new_lines):
     pattern = re.compile(
         re.escape(start_marker) + r"\s*(.*?)\s*" + re.escape(end_marker),

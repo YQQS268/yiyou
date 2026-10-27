@@ -46,6 +46,8 @@ DEFAULT_STATE = {
     "to_say": [],
     "to_say_reminder": [],
     "pending_said": [],
+    # 开场白去重：最近 5 条开场白（首 10 字相同则重新生成）
+    "recent_openers": [],
     "last_notify": None,
     "notify_date": None,
     "notify_count_today": 0,
