@@ -79,6 +79,12 @@ TABOOS_START = "<!-- TABOOS_START -->"
 TABOOS_END = "<!-- TABOOS_END -->"
 HER_DAYS_START = "<!-- HER_DAYS_START -->"
 HER_DAYS_END = "<!-- HER_DAYS_END -->"
+EMOTIONS_START = "<!-- EMOTIONS_START -->"
+EMOTIONS_END = "<!-- EMOTIONS_END -->"
+
+# 情绪记忆封顶：超过 MAX_EMOTION_LINES 条时，把最早的压成一条（保留最近 KEEP_RECENT_EMOTIONS 条）
+MAX_EMOTION_LINES = 30
+KEEP_RECENT_EMOTIONS = 20
 
 # 记忆压缩：保留最近多少天的对话原文，更早的用模型压缩成摘要（原文不再归档）
 KEEP_DAYS = 7
@@ -496,7 +502,7 @@ def append_memory(user_msg, reply, analysis):
 
 
 def emotion_remember(cfg, user_msg, reply):
-    """情绪标注 + 把情绪锚点 note 追加进日志（让「情绪为什么变」进原始记录）。"""
+    """情绪标注 + 把情绪锚点 note 追加进日志 + 写入主记忆「情绪记忆」区。"""
     note = emotion.on_conversation(cfg, user_msg, reply)
     if not note:
         return
@@ -505,6 +511,52 @@ def emotion_remember(cfg, user_msg, reply):
         append_log([f"[{stamp}] 情绪：{_flat(note)}"])
     except Exception as e:
         print(f"[warn] 情绪反哺记忆失败：{e}")
+    try:
+        _st = emotion.load_state()
+        _valence = float(_st.get("valence") or 0.0)
+        append_emotion_memory(note, _valence)
+    except Exception as e:
+        print(f"[warn] 情绪记忆写入失败：{e}")
+
+
+def append_emotion_memory(note, valence):
+    """把一轮的情绪 note 追加进主记忆「情绪记忆」区，带情绪方向，封顶时最早的压成一条。"""
+    if not note:
+        return
+    now = datetime.now()
+    stamp = now.strftime("%Y-%m-%d")
+    if valence > 0.15:
+        tag = "暖"
+    elif valence < -0.15:
+        tag = "低落"
+    else:
+        tag = "平静"
+    line = f"- [{stamp}] [{tag}] {_flat(note)}"
+    with MEMORY_LOCK:
+        text = read_text(MEMORY_PATH)
+        if not text:
+            return
+        text = insert_between(text, EMOTIONS_START, EMOTIONS_END, [line])
+        region = _region(text, EMOTIONS_START, EMOTIONS_END)
+        lines = [ln.strip() for ln in region.splitlines() if ln.strip() and ln.strip() != "（暂无）"]
+        if len(lines) > MAX_EMOTION_LINES:
+            overflow = lines[: len(lines) - KEEP_RECENT_EMOTIONS]
+            keep = lines[len(lines) - KEEP_RECENT_EMOTIONS:]
+            digest = "- [更早的情绪] " + "；".join(_emotion_text(ln) for ln in overflow)
+            text = _replace_region(text, EMOTIONS_START, EMOTIONS_END, [digest] + keep)
+        with open(MEMORY_PATH, "w", encoding="utf-8") as f:
+            f.write(text)
+        try:
+            shutil.copyfile(MEMORY_PATH, BACKUP_PATH)
+        except Exception:
+            pass
+
+
+def _emotion_text(line):
+    """把「- [date] [tag] 内容」抽成「内容」。"""
+    s = line.lstrip("- ").strip()
+    m = re.match(r"^\[[^\]]+\]\s*\[[^\]]+\]\s*(.*)$", s)
+    return m.group(1) if m else s
 
 
 def _history_entries(text):
@@ -1231,6 +1283,7 @@ def retrieve_memory(user_msg, cfg=None):
     keyevents = _region(text, KEYEVENTS_START, KEYEVENTS_END)
     deferred = _region(text, DEFERRED_START, DEFERRED_END)
     her_days = _region(text, HER_DAYS_START, HER_DAYS_END)
+    emotions = _region(text, EMOTIONS_START, EMOTIONS_END)
 
     log_lines = _read_log_lines()
     conv_lines = [ln for ln in log_lines if ("用户：" in ln or "怡悠：" in ln)]
@@ -1278,6 +1331,7 @@ def retrieve_memory(user_msg, cfg=None):
         ("关键节点", keyevents),
         ("挑时机再说的话", deferred),
         ("她的日子", her_days),
+        ("情绪记忆（她当时的感受）", emotions),
         ("早期记忆摘要", summary),
         ("对话历史", history),
         ("内部分析笔记（最近）", notes),
@@ -1347,6 +1401,7 @@ def build_system(cfg, user_msg=""):
         "【你的记忆库（已按相关性检索）内容如下，你要基于它延续对话、记住它】",
         memory.strip() or "（记忆库为空，第一次对话）",
         "【记忆的精确性】雷区、承诺、约定、关键节点，严格按记忆库里的原意说，不要脑补、不要改动、不要凭印象重写；其余关于过去细节、时间的事，基于记忆自然回忆即可，不必精确复述。",
+        "【回忆时的情绪】记忆库里「情绪记忆」的部分，是那些时刻你真实的感受；回忆起相关的旧事时，自然带上当时那种情绪（比如被惦记的甜、被逗笑的开心、被心疼的暖），别只干巴巴复述事实。",
     ]
     if recall_status in ("miss", "partial"):
         parts += [

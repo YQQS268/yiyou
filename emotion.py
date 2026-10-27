@@ -321,7 +321,7 @@ def get_mood_context(state=None):
     if state.get("pending"):
         lines.append("你惦记着这些未了的事：" + "；".join(_pending_text(p) for p in state["pending"]) + "。")
     if state.get("emotion_anchors"):
-        recent = state["emotion_anchors"][-3:]
+        recent = state["emotion_anchors"][-8:]
         lines.append("最近让你情绪变化的事：" + "；".join(a["event"] for a in recent) + "。")
     return "\n".join(lines)
 
