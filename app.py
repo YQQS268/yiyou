@@ -406,7 +406,11 @@ def parse_reply(message):
             return analysis, FALLBACK_STUCK
         return analysis, reply
 
-    # 兜底：既无 reasoning 也无分隔符，记录原始内容，绝不泄露给用户
+    # 非思考模式重试：无 reasoning 无分隔符，但模型直接输出了纯正文 → 当作正文返回
+    if content:
+        return "", content
+
+    # 兜底：既无 reasoning 也无正文，记录原始内容，绝不泄露给用户
     try:
         with open(os.path.join(BASE_DIR, "parse_errors.log"), "a", encoding="utf-8") as f:
             f.write("[" + datetime.now().strftime("%Y-%m-%d %H:%M:%S") + "] " + repr(content) + "\n")
@@ -1689,10 +1693,10 @@ class Handler(BaseHTTPRequestHandler):
             self._send(500, json.dumps({"error": str(e)}, ensure_ascii=False))
             return
 
-        # reasoner 偶发只返回思考、没返回正文（表现为"卡了一下"兜底话），自动重试一次
+        # reasoner 偶发只返回思考、没返回正文（表现为“卡了一下”兜底话），换非思考模式重试一次
         if _is_fallback(reply):
             try:
-                message = call_deepseek(cfg, api_messages, thinking="enabled")
+                message = call_deepseek(cfg, api_messages, thinking="disabled")
                 analysis2, reply2 = parse_reply(message)
                 if reply2 and not _is_fallback(reply2):
                     analysis, reply = analysis2, reply2
