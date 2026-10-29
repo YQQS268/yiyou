@@ -83,10 +83,15 @@ EMOTIONS_START = "<!-- EMOTIONS_START -->"
 EMOTIONS_END = "<!-- EMOTIONS_END -->"
 REL_EVENTS_START = "<!-- REL_EVENTS_START -->"
 REL_EVENTS_END = "<!-- REL_EVENTS_END -->"
+REFLECT_START = "<!-- REFLECT_START -->"
+REFLECT_END = "<!-- REFLECT_END -->"
 
 # 情绪记忆封顶：超过 MAX_EMOTION_LINES 条时，把最早的压成一条（保留最近 KEEP_RECENT_EMOTIONS 条）
 MAX_EMOTION_LINES = 30
 KEEP_RECENT_EMOTIONS = 20
+
+# 自我反思封顶：保留最近多少条「关于自己的观察」
+MAX_REFLECT_LINES = 10
 
 # 情绪记忆触发的主动：距离上次对话至少多少小时才可能触发（安静下来才想起，不是到点打卡）
 EMOTIONAL_SAY_MIN_GAP_HOURS = 2
@@ -182,6 +187,9 @@ def ensure_memory_files():
             "<!-- KEYEVENTS_START -->\n（暂无）\n<!-- KEYEVENTS_END -->\n"
             "<!-- TABOOS_START -->\n（暂无）\n<!-- TABOOS_END -->\n"
             "<!-- HER_DAYS_START -->\n（暂无）\n<!-- HER_DAYS_END -->\n"
+            "<!-- EMOTIONS_START -->\n（暂无）\n<!-- EMOTIONS_END -->\n"
+            "<!-- REL_EVENTS_START -->\n（暂无）\n<!-- REL_EVENTS_END -->\n"
+            "<!-- REFLECT_START -->\n（暂无）\n<!-- REFLECT_END -->\n"
         )
         with open(MEMORY_PATH, "w", encoding="utf-8") as f:
             f.write(skeleton)
@@ -320,6 +328,21 @@ def _read_log_lines():
     with LOG_LOCK:
         with open(LOG_PATH, "r", encoding="utf-8") as f:
             return [ln.rstrip("\n") for ln in f if ln.strip()]
+
+
+def log_deletion_proposal(region_label, removed_lines, condensed=""):
+    """遗忘提案制：压缩/遗忘删除内容前，先把被删条目留痕到日志，不静默消失。"""
+    if not removed_lines:
+        return
+    stamp = datetime.now().strftime("%Y-%m-%d %H:%M")
+    header = f"[{stamp}] [遗忘提案] {region_label}：压缩删除 {len(removed_lines)} 条"
+    if condensed:
+        header += f" → {_flat(condensed)}"
+    lines = [header] + ["  - " + _flat(ln) for ln in removed_lines]
+    try:
+        append_log(lines)
+    except Exception as e:
+        print(f"[warn] 遗忘提案留痕失败：{e}")
 
 
 def ensure_api_key(cfg):
@@ -688,6 +711,7 @@ def compress_old_history(cfg):
                 return
             stamp = datetime.now().strftime("%Y-%m-%d")
             text = insert_between(text, SUMMARY_START, SUMMARY_END, [f"- [{stamp}] {_flat(summary)}"])
+            log_deletion_proposal("对话历史", still_there, summary)
             text = _remove_lines_from_history(text, still_there)
             snapshot_memory()
             with open(MEMORY_PATH, "w", encoding="utf-8") as f:
@@ -757,6 +781,7 @@ def recompress_summary(cfg):
             text = read_text(MEMORY_PATH)
             if not text:
                 return
+            log_deletion_proposal("早期记忆摘要", old, condensed)
             text = _replace_region(text, SUMMARY_START, SUMMARY_END, new_lines)
             snapshot_memory()
             with open(MEMORY_PATH, "w", encoding="utf-8") as f:
@@ -790,6 +815,7 @@ def recompress_profile(cfg):
             text = read_text(MEMORY_PATH)
             if not text:
                 return
+            log_deletion_proposal("用户画像", old, condensed)
             text = _replace_region(text, PROFILE_START, PROFILE_END, new_lines)
             snapshot_memory()
             with open(MEMORY_PATH, "w", encoding="utf-8") as f:
@@ -823,6 +849,7 @@ def recompress_keyevents(cfg):
             text = read_text(MEMORY_PATH)
             if not text:
                 return
+            log_deletion_proposal("关键节点", old, condensed)
             text = _replace_region(text, KEYEVENTS_START, KEYEVENTS_END, new_lines)
             snapshot_memory()
             with open(MEMORY_PATH, "w", encoding="utf-8") as f:
@@ -922,6 +949,61 @@ def refine_daily_context(cfg):
         emotion.save_state(st)
     except Exception as e:
         print(f"[warn] 生活快照提炼失败：{e}")
+
+
+def reflect(cfg):
+    """定期自我反思：每天最多一次，回顾最近的情绪记忆/关系事件/对话，写一段「关于自己的观察」进主记忆。"""
+    try:
+        st = emotion.load_state()
+        today = datetime.now().strftime("%Y-%m-%d")
+        if st.get("last_reflect_date") == today:
+            return
+        with MEMORY_LOCK:
+            text = read_text(MEMORY_PATH)
+        if not text:
+            return
+        emotions = _region(text, EMOTIONS_START, EMOTIONS_END)
+        rel_events = _region(text, REL_EVENTS_START, REL_EVENTS_END)
+        if emotions in ("", "（暂无）") and rel_events in ("", "（暂无）"):
+            return
+        log_lines = _read_log_lines()
+        recent = [ln for ln in log_lines[-40:] if any(k in ln for k in ("用户：", "怡悠：", "情绪：", "内部分析："))]
+        if len(recent) < 3:
+            return
+        prompt = (
+            "怡悠最近的情绪记忆（她当时的感受）：\n" + (emotions if emotions != "（暂无）" else "（还没有）") + "\n\n"
+            "你们之间最近的重要变化：\n" + (rel_events if rel_events != "（暂无）" else "（还没有）") + "\n\n"
+            "最近的对话片段：\n" + "\n".join(recent) + "\n\n"
+            "请从怡悠的视角，写一段「关于我自己的观察」（2-3 句话，第一人称）："
+            "我最近是什么状态、对这段关系有什么真实的感受或变化、心里有什么在冒头。"
+            "要求：具体、有依据（都来自上面素材），别写空泛的哲学感叹，别自我标签化，别说「我顿悟了」之类的大话；"
+            "就是一个人安静下来，回头看看自己最近的样子，说两句心里话。"
+            "用中文写，不要列表、不要标题。"
+        )
+        observation = _summarize(cfg, prompt, "你是怡悠的自我反思助手：帮她把最近的感受沉淀成一段朴素的自我观察，只输出观察本身。")
+        if not observation:
+            return
+        line = f"- [{today}] {_flat(observation)}"
+        with MEMORY_LOCK:
+            text = read_text(MEMORY_PATH)
+            if not text:
+                return
+            text = insert_between(text, REFLECT_START, REFLECT_END, [line])
+            region = _region(text, REFLECT_START, REFLECT_END)
+            lines = [ln.strip() for ln in region.splitlines() if ln.strip() and ln.strip() != "（暂无）"]
+            if len(lines) > MAX_REFLECT_LINES:
+                text = _replace_region(text, REFLECT_START, REFLECT_END, lines[-MAX_REFLECT_LINES:])
+            snapshot_memory()
+            with open(MEMORY_PATH, "w", encoding="utf-8") as f:
+                f.write(text)
+            try:
+                shutil.copyfile(MEMORY_PATH, BACKUP_PATH)
+            except Exception:
+                pass
+        st["last_reflect_date"] = today
+        emotion.save_state(st)
+    except Exception as e:
+        print(f"[warn] 自我反思失败：{e}")
 
 
 def show_notification(title, msg):
@@ -1146,6 +1228,10 @@ def background_evolve(cfg):
             refine_daily_context(cfg)
         except Exception as e:
             print(f"[warn] 生活快照提炼失败：{e}")
+        try:
+            reflect(cfg)
+        except Exception as e:
+            print(f"[warn] 自我反思失败：{e}")
         try:
             recompress_summary(cfg)
         except Exception as e:
@@ -1374,6 +1460,33 @@ def _char_bigrams(text):
     return grams
 
 
+def _expired(line, today=None):
+    """时间有效性：条目带 [until:YYYY-MM-DD] 且已过期时返回 True（失效不喂，但保留在文件里可回溯）。"""
+    m = re.search(r"\[until:(\d{4}-\d{2}-\d{2})\]", line)
+    if not m:
+        return False
+    today = today or datetime.now().strftime("%Y-%m-%d")
+    return m.group(1) < today
+
+
+def _region_summarize(user_msg, region_text, full=False, cap=40):
+    """检索分级：区内条目按相关性分级——命中的全量、未命中的只留一行摘要（省 token）。full=True 时全量喂（安全关键区）。"""
+    lines = [ln.strip() for ln in (region_text or "").splitlines() if ln.strip() and ln.strip() != "（暂无）" and not _expired(ln)]
+    if not lines or full:
+        return "\n".join(lines)
+    q_grams = _char_bigrams(user_msg)
+    if not q_grams:
+        return "\n".join(lines)  # 无有效关键词，全量兜底（避免误漏）
+    out = []
+    for ln in lines:
+        if q_grams & _char_bigrams(ln):
+            out.append(ln)
+        else:
+            flat = _flat(ln)
+            out.append(flat[:cap] + ("…" if len(flat) > cap else ""))
+    return "\n".join(out)
+
+
 def retrieve_memory(user_msg, cfg=None):
     """检索式记忆：主记忆（画像/雷区/关键节点/摘要/挑时机）全量喂；对话原文与内部分析从日志读。"""
     _hist_limit = (cfg or {}).get("retrieve_log_limit", MAX_HISTORY_LINES)
@@ -1381,18 +1494,22 @@ def retrieve_memory(user_msg, cfg=None):
     with MEMORY_LOCK:
         text = read_text(MEMORY_PATH)
 
-    profile = _region(text, PROFILE_START, PROFILE_END)
-    summary = _region(text, SUMMARY_START, SUMMARY_END)
-    taboos = _region(text, TABOOS_START, TABOOS_END)
-    keyevents = _region(text, KEYEVENTS_START, KEYEVENTS_END)
-    deferred = _region(text, DEFERRED_START, DEFERRED_END)
-    her_days = _region(text, HER_DAYS_START, HER_DAYS_END)
-    emotions = _region(text, EMOTIONS_START, EMOTIONS_END)
-    rel_events = _region(text, REL_EVENTS_START, REL_EVENTS_END)
+    # 检索分级：雷区/关键节点/画像 = 安全与身份关键区，全量喂；其余区命中全量、未命中留一行摘要
+    profile = _region_summarize(user_msg, _region(text, PROFILE_START, PROFILE_END), full=True)
+    summary = _region_summarize(user_msg, _region(text, SUMMARY_START, SUMMARY_END))
+    taboos = _region_summarize(user_msg, _region(text, TABOOS_START, TABOOS_END), full=True)
+    keyevents = _region_summarize(user_msg, _region(text, KEYEVENTS_START, KEYEVENTS_END), full=True)
+    deferred = _region_summarize(user_msg, _region(text, DEFERRED_START, DEFERRED_END))
+    her_days = _region_summarize(user_msg, _region(text, HER_DAYS_START, HER_DAYS_END))
+    emotions = _region_summarize(user_msg, _region(text, EMOTIONS_START, EMOTIONS_END))
+    rel_events = _region_summarize(user_msg, _region(text, REL_EVENTS_START, REL_EVENTS_END))
+    reflect = _region_summarize(user_msg, _region(text, REFLECT_START, REFLECT_END))
 
     log_lines = _read_log_lines()
     conv_lines = [ln for ln in log_lines if ("用户：" in ln or "怡悠：" in ln)]
     note_lines = [ln for ln in log_lines if ("内部分析：" in ln or "情绪：" in ln)]
+    mood_lines = [ln for ln in log_lines if "心情打卡：" in ln]
+    mood_text = "\n".join(mood_lines[-10:]) if mood_lines else ""
 
     hist_lines = conv_lines
     q_grams = _char_bigrams(user_msg)
@@ -1432,12 +1549,14 @@ def retrieve_memory(user_msg, cfg=None):
     blocks = []
     for label, content in (
         ("用户画像", profile),
+        ("你最近的心情（打卡记录）", mood_text),
         ("雷区（绝不能碰）", taboos),
         ("关键节点", keyevents),
         ("挑时机再说的话", deferred),
         ("她的日子", her_days),
         ("情绪记忆（她当时的感受）", emotions),
         ("关系事件（你们之间的重要变化）", rel_events),
+        ("关于自己的观察（她的自我反思）", reflect),
         ("早期记忆摘要", summary),
         ("对话历史", history),
         ("内部分析笔记（最近）", notes),
@@ -1534,7 +1653,7 @@ def build_system(cfg, user_msg=""):
 
 
 class Handler(BaseHTTPRequestHandler):
-    server_version = "Yiyou/1.0"
+    server_version = "Yiyou/1.2"
 
     def _send(self, code, body, content_type="application/json; charset=utf-8"):
         if isinstance(body, str):
@@ -1567,6 +1686,15 @@ class Handler(BaseHTTPRequestHandler):
             except Exception:
                 pass
             self._send(200, json.dumps({"messages": load_session()}, ensure_ascii=False))
+            return
+        if self.path == "/mood":
+            log_lines = _read_log_lines()
+            parsed = []
+            for ln in log_lines:
+                m = re.match(r"^\[(\d{4}-\d{2}-\d{2}) \d{2}:\d{2}\] 心情打卡：(.+)$", ln)
+                if m:
+                    parsed.append({"date": m.group(1), "mood": m.group(2)})
+            self._send(200, json.dumps({"moods": parsed[-20:]}, ensure_ascii=False))
             return
         # 附件图片（用户分享的图）：仅允许 attachments 目录下、白名单扩展名，防路径遍历
         if self.path.startswith("/attach/"):
@@ -1603,6 +1731,23 @@ class Handler(BaseHTTPRequestHandler):
         self._send(404, "Not Found", "text/plain; charset=utf-8")
 
     def do_POST(self):
+        if self.path == "/mood":
+            try:
+                length = int(self.headers.get("Content-Length", "0"))
+                raw = self.rfile.read(length).decode("utf-8")
+                req = json.loads(raw)
+                mood = (req.get("mood") or "").strip()
+                allowed = ("开心", "平静", "低落", "生气", "难过")
+                if mood not in allowed:
+                    self._send(400, json.dumps({"error": "心情不在可选范围内"}, ensure_ascii=False))
+                    return
+                stamp = datetime.now().strftime("%Y-%m-%d %H:%M")
+                append_log([f"[{stamp}] 心情打卡：{mood}"])
+                self._send(200, json.dumps({"ok": True, "mood": mood}, ensure_ascii=False))
+                return
+            except Exception as e:
+                self._send(400, json.dumps({"error": f"请求解析失败：{e}"}, ensure_ascii=False))
+                return
         if self.path != "/chat":
             self._send(404, "Not Found", "text/plain; charset=utf-8")
             return

@@ -72,6 +72,8 @@ DEFAULT_STATE = {
     "log_processed_lines": 0,
     "log_daily_context_date": None,
     "log_daily_processed": 0,
+    # 自我反思：上次反思日期（每天最多一次）
+    "last_reflect_date": None,
 }
 
 

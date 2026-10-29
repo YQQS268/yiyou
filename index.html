@@ -109,6 +109,43 @@
     font-weight: 600;
   }
   #imgBtn:hover { background: #d0d0d0; }
+  #moodBtn {
+    padding: 0 14px;
+    background: #e0e0e0;
+    color: #191919;
+    font-size: 18px;
+    font-weight: 600;
+  }
+  #moodBtn:hover { background: #d0d0d0; }
+  .mood-panel {
+    padding: 8px 12px;
+    background: #fff;
+    border-top: 1px solid #e0e0e0;
+    flex-shrink: 0;
+  }
+  .mood-options {
+    display: flex;
+    gap: 6px;
+    flex-wrap: wrap;
+  }
+  .mood-options button {
+    border: 1px solid #e0e0e0;
+    background: #f7f7f7;
+    color: #191919;
+    padding: 5px 10px;
+    border-radius: 14px;
+    font-size: 13px;
+    cursor: pointer;
+    font-family: inherit;
+  }
+  .mood-options button:hover { background: #eef0fb; border-color: #6d8adf; }
+  .mood-history {
+    margin-top: 6px;
+    font-size: 12px;
+    color: #999;
+    white-space: nowrap;
+    overflow-x: auto;
+  }
   .img-preview {
     display: flex;
     align-items: center;
@@ -213,7 +250,19 @@
     <button id="imgPreviewClear" type="button">×</button>
   </div>
 
+  <div class="mood-panel" id="moodPanel" style="display:none">
+    <div class="mood-options">
+      <button type="button" data-mood="开心">😊 开心</button>
+      <button type="button" data-mood="平静">😌 平静</button>
+      <button type="button" data-mood="低落">😔 低落</button>
+      <button type="button" data-mood="生气">😠 生气</button>
+      <button type="button" data-mood="难过">😢 难过</button>
+    </div>
+    <div class="mood-history" id="moodHistory"></div>
+  </div>
+
   <div class="input-bar">
+    <button id="moodBtn" type="button">😊</button>
     <button id="imgBtn" type="button">＋</button>
     <input id="input" type="text" placeholder="说点什么…" autocomplete="off">
     <button id="send">发送</button>
@@ -229,6 +278,9 @@
   const imgPreview = document.getElementById('imgPreview');
   const imgPreviewList = document.getElementById('imgPreviewList');
   const imgPreviewClear = document.getElementById('imgPreviewClear');
+  const moodBtn = document.getElementById('moodBtn');
+  const moodPanel = document.getElementById('moodPanel');
+  const moodHistory = document.getElementById('moodHistory');
 
   // 待发送的图片（选图后暂存，点发送时随消息一起发），最多 5 张
   let pendingImages = []; // [{ dataUrl, name }]
@@ -531,6 +583,53 @@
   imgPreviewClear.addEventListener('click', () => {
     pendingImages = [];
     renderThumbs();
+  });
+
+  // 心情打卡：点 😊 打开面板，选一个心情记录，怡悠会知道你最近怎么样
+  async function loadMoodHistory() {
+    try {
+      const resp = await fetch('/mood');
+      if (!resp.ok) return;
+      const data = await resp.json();
+      const moods = data.moods || [];
+      moodHistory.textContent = moods.length
+        ? moods.slice(-8).map(m => m.date.slice(5) + ' ' + m.mood).join('  ·  ')
+        : '还没记录过心情，点上面的表情记一个吧';
+    } catch (err) {
+      moodHistory.textContent = '';
+    }
+  }
+
+  async function sendMood(mood) {
+    try {
+      const resp = await fetch('/mood', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ mood })
+      });
+      if (!resp.ok) {
+        const data = await resp.json().catch(() => ({}));
+        throw new Error(data.error || '记录失败');
+      }
+      moodPanel.style.display = 'none';
+      addBubble('yiyou', '（已记下你今天的心情：' + mood + '）');
+    } catch (err) {
+      addBubble('yiyou', '（心情记录失败：' + err.message + '）');
+    }
+  }
+
+  moodBtn.addEventListener('click', async () => {
+    if (moodPanel.style.display === 'none') {
+      moodPanel.style.display = 'block';
+      await loadMoodHistory();
+      scrollBottom();
+    } else {
+      moodPanel.style.display = 'none';
+    }
+  });
+
+  document.querySelectorAll('.mood-options button').forEach(btn => {
+    btn.addEventListener('click', () => sendMood(btn.dataset.mood));
   });
 
   // 拉取当前会话（后端 session.json）
