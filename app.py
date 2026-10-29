@@ -1653,7 +1653,7 @@ def build_system(cfg, user_msg=""):
 
 
 class Handler(BaseHTTPRequestHandler):
-    server_version = "Yiyou/1.2"
+    server_version = "Yiyou/1.3"
 
     def _send(self, code, body, content_type="application/json; charset=utf-8"):
         if isinstance(body, str):
