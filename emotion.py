@@ -252,6 +252,19 @@ def on_conversation(cfg, user_msg, reply):
     return note
 
 
+def _sticker_names():
+    """扫描 stickers 目录（与 emotion.py 同目录），返回表情包 key 列表（文件名去扩展名=用途）。找不到返回空列表。"""
+    try:
+        d = os.path.join(os.path.dirname(os.path.abspath(__file__)), "stickers")
+        if not os.path.isdir(d):
+            return []
+        exts = (".png", ".jpg", ".jpeg", ".gif", ".webp")
+        return [os.path.splitext(f)[0].strip() for f in os.listdir(d)
+                if os.path.splitext(f)[1].lower() in exts and os.path.splitext(f)[0].strip()]
+    except Exception:
+        return []
+
+
 def _gen_one_say(cfg, items):
     """基于一组未了事/约定，让 flash（非思考模式）生成一句主动想说的话。失败返回 None。"""
     text = "；".join(items)
@@ -265,6 +278,15 @@ def _gen_one_say(cfg, items):
         "- 其中有些是「挑时机再说的话」：现在不是合适时机的，就换一件或跳过，别硬说。\n"
         "- 只输出这句话本身，不要任何解释、引号或前缀。\n"
     )
+    _stk = _sticker_names()
+    if _stk:
+        _example = _stk[0] if _stk else "卖萌1"
+        _stk_line = "、".join(f"「{k}」" for k in _stk)
+        prompt = prompt.replace(
+            "- 只输出这句话本身",
+            f"- 可以顺手带一个表情包：想发图时，单独一行写 `[sticker:{_example}]` 这样的格式（把「{_example}」换成你要发的那个名字）。可用名字：{_stk_line}。不想发就不发。禁止用文字描述表情包。\n- 只输出这句话本身",
+            1,
+        )
     payload = {
         "model": "deepseek-flash",
         "messages": [

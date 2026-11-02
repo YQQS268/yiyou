@@ -33,6 +33,7 @@ import threading
 import time
 import urllib.request
 import urllib.error
+import urllib.parse
 import sys
 import webbrowser
 from datetime import datetime, timedelta
@@ -133,6 +134,9 @@ ATTACHMENT_KEEP_DAYS = 30
 MAX_IMAGE_BYTES = 10 * 1024 * 1024
 IMAGE_DETAIL = "original"
 
+# 表情包图库：本地预置，文件名（去扩展名）= 用途（key），用户与怡悠共用同一套
+STICKERS_DIR = os.path.join(BASE_DIR, "stickers")
+
 MEMORY_LOCK = threading.Lock()
 LOG_LOCK = threading.Lock()
 SESSION_LOCK = threading.Lock()
@@ -224,9 +228,9 @@ def save_session(messages):
         json.dump({"messages": messages}, f, ensure_ascii=False, indent=2)
 
 
-def append_session(role, content, image=None, images=None):
+def append_session(role, content, image=None, images=None, sticker=None):
     """把一条消息追加进当前会话（role: user/assistant）。带锁，防并发读写撕裂。
-    image 为单个附件 URL（向后兼容），images 为多图 URL 列表。"""
+    image 为单个附件 URL（向后兼容），images 为多图 URL 列表，sticker 为表情包 key（用户发的表情包）。"""
     with SESSION_LOCK:
         msgs = load_session()
         entry = {
@@ -239,6 +243,8 @@ def append_session(role, content, image=None, images=None):
             imgs.append(image)
         if imgs:
             entry["images"] = imgs
+        if sticker:
+            entry["sticker"] = sticker
         msgs.append(entry)
         save_session(msgs)
 
@@ -269,6 +275,55 @@ def save_attachment(data_url):
         return "/attach/" + name, name
     except Exception:
         return None, None
+
+
+def scan_stickers():
+    """扫描 stickers/ 目录，返回 {key: 文件名}。key = 去扩展名的文件名（=用途），文件名含扩展名。"""
+    stickers = {}
+    if not os.path.isdir(STICKERS_DIR):
+        return stickers
+    try:
+        for name in os.listdir(STICKERS_DIR):
+            stem, ext = os.path.splitext(name)
+            if ext.lower() in IMG_CONTENT_TYPES and stem.strip():
+                stickers[stem.strip()] = name
+    except Exception:
+        pass
+    return stickers
+
+
+def _clean_stickers(text, sticker_keys):
+    """把文本里 [sticker:key] 中 key 不在白名单的标记删掉（合法保留），不让原文露给用户。"""
+    if not text:
+        return text
+
+    def _sub(m):
+        key = (m.group(1) or "").strip()
+        return m.group(0) if key in sticker_keys else ""
+
+    return re.sub(r"\[sticker:([^\]]+)\]", _sub, text)
+
+
+def _stickers_to_note(text):
+    """把文本里 [sticker:key] 标记转成中性文本「（发了表情包：key）」，避免标记原文进日志/记忆。"""
+    if not text:
+        return text
+    return re.sub(r"\[sticker:([^\]]+)\]", r"（发了表情包：\1）", text)
+
+
+def _normalize_sticker_marks(text, sticker_keys):
+    """规范化表情包标记：合法 [sticker:key] 保留；「（发了个表情包：X）」这类描述转成 [sticker:X]；非法标记/描述删除。"""
+    if not text:
+        return text
+
+    def _desc(m):
+        key = (m.group(1) or "").strip()
+        return f"[sticker:{key}]" if key in sticker_keys else ""
+
+    # 描述转标记（先处理）
+    text = re.sub(r"（发[了个]*表情包[：:]\s*([^）)]+?)\s*）", _desc, text)
+    # 清理非法标记
+    return _clean_stickers(text, sticker_keys)
 
 
 def cleanup_attachments(cfg=None):
@@ -1008,6 +1063,8 @@ def reflect(cfg):
 
 def show_notification(title, msg):
     """右下角原生 toast：设置进程 AUMID + 发带 launch 的通知（点击跳聊天页），进操作中心留记录。失败降级到 MessageBoxW。"""
+    # 方案一：通知只显示文字，[sticker:xx] 转掉，点通知跳进聊天页看图
+    msg = re.sub(r"\[sticker:[^\]]+\]", "（表情包）", msg or "")
     try:
         import subprocess, tempfile, os
 
@@ -1152,6 +1209,16 @@ def _gen_emotional_say(cfg, emotion_line, daily):
         "- 语气自然，是你安静下来想起他、想确认那份安心还在的感觉，不是打卡、不是查岗、不是有事要问。\n"
         "- 只输出这句话本身，不要任何解释、引号或前缀。\n"
     )
+    _stk = scan_stickers()
+    if _stk:
+        _stk_keys = list(_stk.keys())
+        _stk_line = "、".join(f"「{k}」" for k in _stk_keys)
+        _example = _stk_keys[0] if _stk_keys else "卖萌1"
+        prompt = prompt.replace(
+            "- 只输出这句话本身",
+            f"- 可以顺手带一个表情包：想发图时，单独一行写 `[sticker:{_example}]` 这样的格式（把「{_example}」换成你要发的那个名字）。可用名字：{_stk_line}。不想发就不发。禁止用文字描述表情包。\n- 只输出这句话本身",
+            1,
+        )
     payload = {
         "model": "deepseek-flash",
         "messages": [
@@ -1632,6 +1699,16 @@ def build_system(cfg, user_msg=""):
         parts += [
             "【记忆的诚实】这次检索到的记忆较少（" + recall_reason + "）。如果对方问的是具体的旧细节（某天、某句话、某件事）而你记忆里没有明确记录，就自然地说「这个我记不太清了，你提醒我一下」，禁止编造具体的时间、地点、原话。日常寒暄不触发这条。",
         ]
+    _stickers = scan_stickers()
+    if _stickers:
+        _sticker_names = "、".join(f"「{k}」" for k in _stickers.keys())
+        parts += [
+            "",
+            "【你的表情包库】你手里有一批表情包图，可以在合适的时候发出来表达情绪、斗图、撒娇，或“不知道怎么回”时只发一张图糊过去。可用表情包（发图时用名字，不要自造）：",
+            _sticker_names,
+            "发图规则：想发图时，单独一行写 `[sticker:名字]`（名字必须用上面列表里的，前后空行隔开）。",
+            "发图频率：平时开心、闲聊、撒娇、斗图时，几乎每条回复都可以带一张图，别克制；只有对方难过、聊正事、踩雷区、或聊得很认真严肃的时候，才不带图、纯文字。",
+        ]
     parts += [
         "",
         "【输出要求】你在思考过程中完成对用户的内部分析（模式识别、历史关联、判断对方状态、是否该挑时机说，这段不会给用户看），",
@@ -1708,6 +1785,23 @@ class Handler(BaseHTTPRequestHandler):
                     return
             self._send(404, "Not Found", "text/plain; charset=utf-8")
             return
+        # 表情包清单（前端面板读）
+        if self.path == "/stickers":
+            self._send(200, json.dumps({"stickers": scan_stickers()}, ensure_ascii=False))
+            return
+        # 表情包图片：仅允许 stickers 目录下、白名单扩展名，防路径遍历；中文文件名需 unquote
+        if self.path.startswith("/stickers/"):
+            _raw = urllib.parse.unquote(self.path[len("/stickers/"):])
+            name = os.path.basename(_raw)
+            stem, ext = os.path.splitext(name)
+            ext = ext.lower()
+            if ext in IMG_CONTENT_TYPES:
+                data = read_bytes(os.path.join(STICKERS_DIR, name))
+                if data is not None:
+                    self._send(200, data, IMG_CONTENT_TYPES[ext])
+                    return
+            self._send(404, "Not Found", "text/plain; charset=utf-8")
+            return
         # 静态图片（头像等）：仅允许 BASE_DIR 下的图片文件，防路径遍历
         name = os.path.basename(self.path)
         stem, ext = os.path.splitext(name)
@@ -1769,15 +1863,22 @@ class Handler(BaseHTTPRequestHandler):
         user_msg = ""
         user_images = []
         user_file_names = []
+        user_sticker = ""
         for m in reversed(messages):
             if m.get("role") == "user":
                 user_msg = m.get("content", "")
+                user_sticker = (m.get("sticker") or "").strip()
                 # 兼容旧格式 image（单个）与新格式 images（数组），最多 5 张
                 _imgs = m.get("images") or ([m.get("image")] if m.get("image") else [])
                 _names = m.get("fileNames") or ([m.get("fileName")] if m.get("fileName") else [])
                 user_images = [x for x in _imgs if x][:5]
                 user_file_names = [str(x) for x in _names if x][:5]
                 break
+
+        # 表情包白名单；用户发的 key 不在库里就不当表情包处理
+        _sticker_map = scan_stickers()
+        if user_sticker not in _sticker_map:
+            user_sticker = ""
 
         system_msg = build_system(cfg, user_msg)
 
@@ -1800,6 +1901,7 @@ class Handler(BaseHTTPRequestHandler):
             _said = _state.get("pending_said") or list()
             if _said:
                 reply = "\n\n".join(_said)
+                reply = _normalize_sticker_marks(reply, _sticker_map)
                 _state["pending_said"] = list()
                 emotion.save_state(_state)
                 append_session("assistant", reply)
@@ -1830,6 +1932,12 @@ class Handler(BaseHTTPRequestHandler):
             for m in messages:
                 role = m.get("role")
                 content = m.get("content", "")
+                _stk = (m.get("sticker") or "").strip()
+                if role == "user" and _stk and _stk in _sticker_map:
+                    if content:
+                        content = content + f"（同时发了个【{_stk}】表情包）"
+                    else:
+                        content = f"（对方发了个【{_stk}】表情包）"
                 _imgs = m.get("images") or ([m.get("image")] if m.get("image") else [])
                 _imgs = [x for x in _imgs if x and str(x).startswith("data:image/")]
                 if role == "user" and _imgs:
@@ -1862,30 +1970,38 @@ class Handler(BaseHTTPRequestHandler):
         if not messages and reply and not _is_fallback(reply):
             reply = _dedupe_opening(cfg, system_msg, reply)
 
-        if user_msg and reply and not _is_fallback(reply):
-            # 图片分享进记忆：日志里记「[分享图片] 原文件名」+ 文字，供提炼进主记忆
+        # 表情包标记清理：白名单外的 key 删掉，不露 [sticker:xx] 原文给用户
+        reply = _normalize_sticker_marks(reply, _sticker_map)
+
+        if (user_msg or user_sticker) and reply and not _is_fallback(reply):
+            # 记忆文本：表情包转中性标注「（对方发了个【X】表情包）」，图片分享记文件名，都不露标记原文
+            _mem_parts = []
+            if user_msg:
+                _mem_parts.append(user_msg)
             if attach_urls:
                 if user_file_names:
                     img_note = "[分享图片] " + "、".join(user_file_names)
                 else:
                     img_note = "[分享图片] %d 张图片" % len(attach_urls)
-                memory_msg = (user_msg + "（" + img_note + "）") if user_msg else img_note
-            else:
-                memory_msg = user_msg
+                _mem_parts.append(img_note)
+            if user_sticker:
+                _mem_parts.append(f"（对方发了个【{user_sticker}】表情包）")
+            memory_msg = "，".join(_mem_parts)
+            _reply_note = _stickers_to_note(reply)  # 怡悠发的表情包标记转中性文本，不进记忆
             try:
-                append_memory(memory_msg, reply, analysis)
+                append_memory(memory_msg, _reply_note, analysis)
             except Exception as e:
                 print(f"[warn] 记忆写入失败：{e}")
-            # 情感系统：后台线程标注这次对话对怡悠情绪的影响并更新状态（失败静默降级，不阻塞回复）
-            try:
-                threading.Thread(target=emotion_remember, args=(cfg, user_msg, reply), daemon=True).start()
-            except Exception as e:
-                print(f"[warn] 情绪更新失败：{e}")
-            # 结构化提取：后台线程提取画像/雷区/关键节点/挑时机的话并写入记忆（失败静默降级）
-            try:
-                threading.Thread(target=structured_extract_and_apply, args=(cfg, user_msg, reply), daemon=True).start()
-            except Exception as e:
-                print(f"[warn] 结构化提取失败：{e}")
+            # 情感系统 + 结构化提取：只在有真实文字时走；纯表情包不代表真实情绪/事实，跳过避免误判
+            if user_msg and user_msg.strip():
+                try:
+                    threading.Thread(target=emotion_remember, args=(cfg, user_msg, _reply_note), daemon=True).start()
+                except Exception as e:
+                    print(f"[warn] 情绪更新失败：{e}")
+                try:
+                    threading.Thread(target=structured_extract_and_apply, args=(cfg, user_msg, _reply_note), daemon=True).start()
+                except Exception as e:
+                    print(f"[warn] 结构化提取失败：{e}")
             # 渐进式压缩：后台线程做，不阻塞回复
             try:
                 threading.Thread(target=refine_from_log, args=(cfg,), daemon=True).start()
@@ -1895,9 +2011,14 @@ class Handler(BaseHTTPRequestHandler):
         # 会话延续：把这一轮追加进 session.json（界面回显）。开场白只记怡悠的话，正常轮记双方。
         if reply and not _is_fallback(reply):
             try:
-                if user_msg or attach_urls:
+                if user_msg or attach_urls or user_sticker:
                     _sess_content = user_msg if user_msg else ("[图片]" if attach_urls else "")
-                    append_session("user", _sess_content, images=attach_urls)
+                    if user_sticker:
+                        if not _sess_content:
+                            _sess_content = "[sticker:" + user_sticker + "]"
+                        append_session("user", _sess_content, images=attach_urls, sticker=user_sticker)
+                    else:
+                        append_session("user", _sess_content, images=attach_urls)
                 append_session("assistant", reply)
             except Exception as e:
                 print(f"[warn] 会话写入失败：{e}")

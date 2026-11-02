@@ -117,6 +117,14 @@
     font-weight: 600;
   }
   #moodBtn:hover { background: #d0d0d0; }
+  #stickerBtn {
+    padding: 0 14px;
+    background: #e0e0e0;
+    color: #191919;
+    font-size: 18px;
+    font-weight: 600;
+  }
+  #stickerBtn:hover { background: #d0d0d0; }
   .mood-panel {
     padding: 8px 12px;
     background: #fff;
@@ -146,6 +154,34 @@
     white-space: nowrap;
     overflow-x: auto;
   }
+  .sticker-panel {
+    padding: 8px 12px;
+    background: #fff;
+    border-top: 1px solid #e0e0e0;
+    flex-shrink: 0;
+    max-height: 220px;
+    overflow-y: auto;
+  }
+  .sticker-options {
+    display: flex;
+    gap: 8px;
+    flex-wrap: wrap;
+  }
+  .sticker-item {
+    border: 1px solid #e0e0e0;
+    background: #f7f7f7;
+    padding: 4px;
+    border-radius: 6px;
+    cursor: pointer;
+    line-height: 0;
+  }
+  .sticker-item:hover { background: #eef0fb; border-color: #6d8adf; }
+  .sticker-item img {
+    width: 56px;
+    height: 56px;
+    object-fit: contain;
+    display: block;
+  }
   .img-preview {
     display: flex;
     align-items: center;
@@ -153,6 +189,31 @@
     padding: 8px 12px;
     background: #f7f7f7;
     border-top: 1px solid #d9d9d9;
+  }
+  .sticker-preview {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 8px 12px;
+    background: #f7f7f7;
+    border-top: 1px solid #d9d9d9;
+    font-size: 13px;
+    color: #666;
+  }
+  .sticker-preview img {
+    height: 40px;
+    border-radius: 4px;
+    display: block;
+  }
+  #stickerPreviewClear {
+    border: none;
+    background: #e0e0e0;
+    border-radius: 50%;
+    width: 22px;
+    height: 22px;
+    cursor: pointer;
+    line-height: 1;
+    font-size: 14px;
   }
   #imgPreviewList {
     display: flex;
@@ -250,6 +311,12 @@
     <button id="imgPreviewClear" type="button">×</button>
   </div>
 
+  <div class="sticker-preview" id="stickerPreview" style="display:none">
+    <span class="sticker-preview-label">待发表情：</span>
+    <img id="stickerPreviewImg" alt="">
+    <button id="stickerPreviewClear" type="button">×</button>
+  </div>
+
   <div class="mood-panel" id="moodPanel" style="display:none">
     <div class="mood-options">
       <button type="button" data-mood="开心">😊 开心</button>
@@ -261,9 +328,14 @@
     <div class="mood-history" id="moodHistory"></div>
   </div>
 
+  <div class="sticker-panel" id="stickerPanel" style="display:none">
+    <div class="sticker-options" id="stickerOptions"></div>
+  </div>
+
   <div class="input-bar">
     <button id="moodBtn" type="button">😊</button>
     <button id="imgBtn" type="button">＋</button>
+    <button id="stickerBtn" type="button">😜</button>
     <input id="input" type="text" placeholder="说点什么…" autocomplete="off">
     <button id="send">发送</button>
   </div>
@@ -281,6 +353,14 @@
   const moodBtn = document.getElementById('moodBtn');
   const moodPanel = document.getElementById('moodPanel');
   const moodHistory = document.getElementById('moodHistory');
+  const stickerBtn = document.getElementById('stickerBtn');
+  const stickerPanel = document.getElementById('stickerPanel');
+  const stickerOptions = document.getElementById('stickerOptions');
+  const stickerPreview = document.getElementById('stickerPreview');
+  const stickerPreviewImg = document.getElementById('stickerPreviewImg');
+  const stickerPreviewClear = document.getElementById('stickerPreviewClear');
+  let stickerMap = {}; // 表情包清单 key -> 文件名
+  let pendingSticker = null; // 预选的表情包 key
 
   // 待发送的图片（选图后暂存，点发送时随消息一起发），最多 5 张
   let pendingImages = []; // [{ dataUrl, name }]
@@ -387,11 +467,80 @@
     return wrap;
   }
 
+  // 表情包清单：key -> 文件名（从后端 /stickers 拉取）
+  async function loadStickers() {
+    try {
+      const resp = await fetch('/stickers');
+      if (!resp.ok) return;
+      const data = await resp.json();
+      stickerMap = data.stickers || {};
+    } catch (err) {
+      stickerMap = {};
+    }
+  }
+
+  // 识别纯 [sticker:key] 文本，返回 key（不在清单里返回 null）
+  function matchSticker(text) {
+    const m = String(text || '').trim().match(/^\[sticker:([^\]]+)\]$/);
+    if (!m) return null;
+    const key = m[1].trim();
+    return stickerMap[key] ? key : null;
+  }
+
+  // 渲染一张表情包图气泡（复用图片渲染）
+  function addStickerBubble(who, key, showMeta, time) {
+    const file = stickerMap[key];
+    if (!file) return;
+    addBubble(who, '', showMeta, time, '/stickers/' + encodeURIComponent(file));
+  }
+
+  // 渲染表情面板
+  function renderStickerPanel() {
+    stickerOptions.innerHTML = '';
+    Object.keys(stickerMap).forEach(key => {
+      const file = stickerMap[key];
+      const btn = document.createElement('button');
+      btn.className = 'sticker-item';
+      btn.type = 'button';
+      btn.title = key;
+      const img = document.createElement('img');
+      img.src = '/stickers/' + encodeURIComponent(file);
+      img.alt = key;
+      btn.appendChild(img);
+      btn.addEventListener('click', () => selectSticker(key));
+      stickerOptions.appendChild(btn);
+    });
+  }
+
+  // 预选一张表情包（不立即发，点发送时和文字一起发）
+  function selectSticker(key) {
+    pendingSticker = key;
+    renderStickerPreview();
+    stickerPanel.style.display = 'none';
+    inputEl.focus();
+  }
+
+  function renderStickerPreview() {
+    if (pendingSticker && stickerMap[pendingSticker]) {
+      stickerPreviewImg.src = '/stickers/' + encodeURIComponent(stickerMap[pendingSticker]);
+      stickerPreview.style.display = 'flex';
+    } else {
+      stickerPreview.style.display = 'none';
+    }
+  }
+
   // 把怡悠的一条回复按空行拆成多条短气泡（像微信连发），只有最后一条显示时间
   function addYiyouReply(text, time = null) {
     const parts = String(text || '').split(/\n\s*\n/).map(s => s.trim()).filter(Boolean);
     if (parts.length === 0) return;
-    parts.forEach((p, i) => addBubble('yiyou', p, i === parts.length - 1, time));
+    parts.forEach((p, i) => {
+      const st = matchSticker(p);
+      if (st) {
+        addStickerBubble('yiyou', st, i === parts.length - 1, time);
+      } else if (!/^\[sticker:/.test(p)) {
+        addBubble('yiyou', p, i === parts.length - 1, time);
+      }
+    });
   }
 
   // 末尾带 // 表示"整条一个气泡"，不按标点拆；返回剥离后的文本与标记
@@ -478,11 +627,15 @@
   async function onSend() {
     const text = inputEl.value.trim();
     const imgs = pendingImages.slice();
-    if (!text && imgs.length === 0) return;
+    const stk = pendingSticker;
+    if (!text && imgs.length === 0 && !stk) return;
     inputEl.value = '';
     pendingImages = [];
+    pendingSticker = null;
     renderThumbs();
-    // 本地先显示：每张图片单独一个气泡，文字走逗号拆多条气泡（图+文时只在最后显示时间）
+    renderStickerPreview();
+    // 本地先显示：表情包 + 图片 + 文字
+    if (stk) addStickerBubble('user', stk, true, null);
     if (imgs.length > 0) {
       imgs.forEach((img, i) => addBubble('user', '', !text && i === imgs.length - 1, null, img.dataUrl));
     }
@@ -497,6 +650,7 @@
         msg.images = imgs.map(i => i.dataUrl);
         msg.fileNames = imgs.map(i => i.name);
       }
+      if (stk) msg.sticker = stk;
       // 只发这一条新消息，历史上下文由后端从 session.json 拼接
       const reply = await sendChat([msg]);
       hideTyping();
@@ -628,6 +782,22 @@
     }
   });
 
+  stickerBtn.addEventListener('click', async () => {
+    if (stickerPanel.style.display === 'none') {
+      if (Object.keys(stickerMap).length === 0) await loadStickers();
+      renderStickerPanel();
+      stickerPanel.style.display = 'block';
+      scrollBottom();
+    } else {
+      stickerPanel.style.display = 'none';
+    }
+  });
+
+  stickerPreviewClear.addEventListener('click', () => {
+    pendingSticker = null;
+    renderStickerPreview();
+  });
+
   document.querySelectorAll('.mood-options button').forEach(btn => {
     btn.addEventListener('click', () => sendMood(btn.dataset.mood));
   });
@@ -649,12 +819,14 @@
     for (const m of msgs) {
       const t = m.time ? m.time.slice(11, 16) : null;
       if (m.role === 'user') {
+        const st = m.sticker || matchSticker(m.content);
+        if (st) addStickerBubble('user', st, true, t);
         const imgs = m.images || (m.image ? [m.image] : []);
+        const hasText = m.content && m.content !== '[图片]' && !/^\[sticker:/.test(m.content);
         if (imgs.length > 0) {
-          const hasText = m.content && m.content !== '[图片]';
           imgs.forEach((img, i) => addBubble('user', '', !hasText && i === imgs.length - 1, t, img));
           if (hasText) addUserReply(m.content, t);
-        } else {
+        } else if (hasText) {
           addUserReply(m.content, t);
         }
       } else if (m.role === 'assistant') {
@@ -665,6 +837,7 @@
 
   // 打开页面：先接上旧会话；只有服务器重启后（session 为空）才让怡悠开场问候
   (async function opening() {
+    await loadStickers();
     addTimeDivider('今天');
     const history = await fetchSession();
     if (history.length > 0) {
