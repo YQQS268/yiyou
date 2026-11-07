@@ -106,6 +106,9 @@ EVOLVE_INTERVAL = 600
 # 主动通知：一天最多几次（只看次数，不看时间冷却）
 NOTIFY_DAILY_MAX = 2
 
+# 普通主动消息的时间冷却：距上次对话不足 N 分钟不弹（约定提醒仍穿透）
+PROACTIVE_MIN_GAP_MINUTES = 30
+
 # 摘要区二次压缩：早期记忆摘要超过多少条时，把更早的再压成一条（保留最近 KEEP_RECENT_SUMMARY 条）
 MAX_SUMMARY_LINES = 12
 KEEP_RECENT_SUMMARY = 4
@@ -290,6 +293,16 @@ def scan_stickers():
     except Exception:
         pass
     return stickers
+
+
+def _load_sticker_meta():
+    """读表情包元数据（stickers_meta.json）：key=表情包名，value=画面/情绪/用途描述。缺失或损坏返回空 dict。"""
+    try:
+        with open(os.path.join(BASE_DIR, "stickers_meta.json"), "r", encoding="utf-8") as f:
+            _d = json.load(f)
+        return _d if isinstance(_d, dict) else {}
+    except Exception:
+        return {}
 
 
 def _clean_stickers(text, sticker_keys):
@@ -1062,21 +1075,36 @@ def reflect(cfg):
 
 
 def show_notification(title, msg):
-    """右下角原生 toast：设置进程 AUMID + 发带 launch 的通知（点击跳聊天页），进操作中心留记录。失败降级到 MessageBoxW。"""
-    # 方案一：通知只显示文字，[sticker:xx] 转掉，点通知跳进聊天页看图
-    msg = re.sub(r"\[sticker:[^\]]+\]", "（表情包）", msg or "")
+    """右下角原生 toast：带表情包图（方案二）+ 文字，点击跳聊天页；失败降级到 MessageBoxW。"""
+    _stk_key = None
+    _m = re.search(r"\[sticker:([^\]]+)\]", msg or "")
+    if _m:
+        _stk_key = _m.group(1).strip()
+    msg = re.sub(r"\[sticker:[^\]]+\]", "", msg or "").strip()
+    if not msg and _stk_key:
+        msg = "（发来一张表情包）"
+    _img_path = ""
+    if _stk_key:
+        _stk_map = scan_stickers()
+        if _stk_key in _stk_map:
+            _img_path = os.path.abspath(os.path.join(STICKERS_DIR, _stk_map[_stk_key]))
     try:
-        import subprocess, tempfile, os
+        import subprocess, tempfile, os, urllib.parse
 
         def _psq(s):
             """PowerShell 单引号字符串转义。"""
             return s.replace("'", "''")
 
+        _img_xml = ""
+        if _img_path:
+            _img_uri = "file:///" + urllib.parse.quote(_img_path.replace("\\", "/"), safe="/:")
+            _img_xml = f'<image src="{_img_uri}" />'
         xml = (
             f'<toast activationType="protocol" launch="http://127.0.0.1:{PORT}" duration="long">'
             '<visual><binding template="ToastGeneric">'
             f'<text><![CDATA[{_psq(title)}]]></text>'
             f'<text><![CDATA[{_psq(msg)}]]></text>'
+            f'{_img_xml}'
             '</binding></visual></toast>'
         )
         script = (
@@ -1164,10 +1192,12 @@ def try_notify(cfg):
         emotion.save_state(state)
         return
 
-    # 普通待说的话：只看每天次数（删除时间冷却与深夜限制）；能量太低也不主动（累了不硬聊，约定提醒仍穿透）
+    # 普通待说的话：只看每天次数；能量太低也不主动（累了不硬聊，约定提醒仍穿透）
     to_say = state.get("to_say") or []
     if not to_say:
         return  # 防线：没正事不弹
+    if _minutes_since_last_chat() < PROACTIVE_MIN_GAP_MINUTES:
+        return  # 防线：距上次对话太近，给足「自主空间」，不弹普通主动话（约定提醒仍穿透）
     if float(state.get("energy", 70)) < 30:
         return  # 防线：能量太低，不主动
     if state.get("notify_count_today", 0) >= cfg.get("proactive_max_per_day", NOTIFY_DAILY_MAX):
@@ -1195,6 +1225,33 @@ def _hours_since_last_chat():
     except Exception:
         pass
     return 999.0
+
+
+def _minutes_since_last_chat():
+    """距最后一轮对话（日志里最后一条用户/怡悠消息）的分钟数；无日志返回大数。"""
+    return _hours_since_last_chat() * 60.0
+
+
+def _fuzzy_stamp(line, now=None):
+    """把日志行开头的 [YYYY-MM-DD HH:MM] 时间戳转成模糊表达：今天/昨天/几号/前段时间/很早以前。"""
+    now = now or datetime.now()
+    m = re.match(r"^\[(\d{4}-\d{2}-\d{2}) (\d{2}):(\d{2})\]", line)
+    if not m:
+        return line
+    d = datetime.strptime(m.group(1), "%Y-%m-%d").date()
+    days = (now.date() - d).days
+    hm = f"{m.group(2)}:{m.group(3)}"
+    if days == 0:
+        label = f"今天 {hm}"
+    elif days == 1:
+        label = f"昨天 {hm}"
+    elif 2 <= days <= 7:
+        label = f"{d.month}月{d.day}日"
+    elif 8 <= days <= 30:
+        label = "前段时间"
+    else:
+        label = "很早以前"
+    return f"[{label}]" + line[m.end():]
 
 
 def _gen_emotional_say(cfg, emotion_line, daily):
@@ -1575,9 +1632,6 @@ def retrieve_memory(user_msg, cfg=None):
     log_lines = _read_log_lines()
     conv_lines = [ln for ln in log_lines if ("用户：" in ln or "怡悠：" in ln)]
     note_lines = [ln for ln in log_lines if ("内部分析：" in ln or "情绪：" in ln)]
-    mood_lines = [ln for ln in log_lines if "心情打卡：" in ln]
-    mood_text = "\n".join(mood_lines[-10:]) if mood_lines else ""
-
     hist_lines = conv_lines
     q_grams = _char_bigrams(user_msg)
     _time_hint = any(k in user_msg for k in ("上次", "那天", "之前", "以前", "还记得"))
@@ -1606,17 +1660,16 @@ def retrieve_memory(user_msg, cfg=None):
             selected = scored[:_hist_limit]
             selected.sort(key=lambda x: x[1])
             hist_lines = [x[2] for x in selected]
-    history = "\n".join(hist_lines)
+    history = "\n".join(_fuzzy_stamp(ln) for ln in hist_lines)
 
     if len(note_lines) > _note_limit:
-        notes = "\n".join(note_lines[-_note_limit:])
+        notes = "\n".join(_fuzzy_stamp(ln) for ln in note_lines[-_note_limit:])
     else:
-        notes = "\n".join(note_lines)
+        notes = "\n".join(_fuzzy_stamp(ln) for ln in note_lines)
 
     blocks = []
     for label, content in (
         ("用户画像", profile),
-        ("你最近的心情（打卡记录）", mood_text),
         ("雷区（绝不能碰）", taboos),
         ("关键节点", keyevents),
         ("挑时机再说的话", deferred),
@@ -1694,6 +1747,7 @@ def build_system(cfg, user_msg=""):
         memory.strip() or "（记忆库为空，第一次对话）",
         "【记忆的精确性】雷区、承诺、约定、关键节点，严格按记忆库里的原意说，不要脑补、不要改动、不要凭印象重写；其余关于过去细节、时间的事，基于记忆自然回忆即可，不必精确复述。",
         "【回忆时的情绪】记忆库里「情绪记忆」的部分，是那些时刻你真实的感受；回忆起相关的旧事时，自然带上当时那种情绪（比如被惦记的甜、被逗笑的开心、被心疼的暖），别只干巴巴复述事实。",
+        "【回忆的时间表达】回忆过去的事发生在什么时候时，用大概的说法，不要报精确到分钟的日期：优先用你记忆里的关键节点当地标（比如「你演出那阵子」「和好之后」），其次用「今天/昨天/几号/前段时间」这种模糊时间。",
     ]
     if recall_status in ("miss", "partial"):
         parts += [
@@ -1701,10 +1755,14 @@ def build_system(cfg, user_msg=""):
         ]
     _stickers = scan_stickers()
     if _stickers:
-        _sticker_names = "、".join(f"「{k}」" for k in _stickers.keys())
+        _meta = _load_sticker_meta()
+        _sticker_names = "；".join(
+            f"「{_k}」" + (f"＝{_meta[_k]}" if _meta.get(_k) else "")
+            for _k in _stickers.keys()
+        )
         parts += [
             "",
-            "【你的表情包库】你手里有一批表情包图，可以在合适的时候发出来表达情绪、斗图、撒娇，或“不知道怎么回”时只发一张图糊过去。可用表情包（发图时用名字，不要自造）：",
+            "【你的表情包库】你手里有一批表情包图，可以在合适的时候发出来表达情绪、斗图、撒娇，或“不知道怎么回”时只发一张图糊过去。每张图后面标了它长什么样、表达什么、适合什么场合，请按当下语境选最贴的一张（名字和含义都用列表里的，不要自造）：",
             _sticker_names,
             "发图规则：想发图时，单独一行写 `[sticker:名字]`（名字必须用上面列表里的，前后空行隔开）。",
             "发图频率：平时开心、闲聊、撒娇、斗图时，几乎每条回复都可以带一张图，别克制；只有对方难过、聊正事、踩雷区、或聊得很认真严肃的时候，才不带图、纯文字。",
@@ -1714,6 +1772,7 @@ def build_system(cfg, user_msg=""):
         "【输出要求】你在思考过程中完成对用户的内部分析（模式识别、历史关联、判断对方状态、是否该挑时机说，这段不会给用户看），",
         "最终回复里只写你要对用户说的话，严格符合人设与规则，不要出现任何分析内容或格式标记。",
         "回复要简短、口语化，像微信聊天：每条回复一句到两三句就停，一个意思拆成几条短消息、中间用空行隔开，不要写成一长段，不要书面腔、不要 AI 味。",
+        "【词穷也没关系】当你想不出说什么、或对方的话让你一时语塞时，不要硬憋一句妙语；可以只发一张表情包、或回一句超短的话（「……」「好哦」「嗯」）糊过去，这很正常。发表情包时，可以先发图、再补一句文字（真人常这样）。",
     ]
     # 遗忘可解释：检索结果写诊断日志（独立文件，不进主记忆），供 diag 统计命中率
     try:
@@ -1763,15 +1822,6 @@ class Handler(BaseHTTPRequestHandler):
             except Exception:
                 pass
             self._send(200, json.dumps({"messages": load_session()}, ensure_ascii=False))
-            return
-        if self.path == "/mood":
-            log_lines = _read_log_lines()
-            parsed = []
-            for ln in log_lines:
-                m = re.match(r"^\[(\d{4}-\d{2}-\d{2}) \d{2}:\d{2}\] 心情打卡：(.+)$", ln)
-                if m:
-                    parsed.append({"date": m.group(1), "mood": m.group(2)})
-            self._send(200, json.dumps({"moods": parsed[-20:]}, ensure_ascii=False))
             return
         # 附件图片（用户分享的图）：仅允许 attachments 目录下、白名单扩展名，防路径遍历
         if self.path.startswith("/attach/"):
@@ -1825,23 +1875,6 @@ class Handler(BaseHTTPRequestHandler):
         self._send(404, "Not Found", "text/plain; charset=utf-8")
 
     def do_POST(self):
-        if self.path == "/mood":
-            try:
-                length = int(self.headers.get("Content-Length", "0"))
-                raw = self.rfile.read(length).decode("utf-8")
-                req = json.loads(raw)
-                mood = (req.get("mood") or "").strip()
-                allowed = ("开心", "平静", "低落", "生气", "难过")
-                if mood not in allowed:
-                    self._send(400, json.dumps({"error": "心情不在可选范围内"}, ensure_ascii=False))
-                    return
-                stamp = datetime.now().strftime("%Y-%m-%d %H:%M")
-                append_log([f"[{stamp}] 心情打卡：{mood}"])
-                self._send(200, json.dumps({"ok": True, "mood": mood}, ensure_ascii=False))
-                return
-            except Exception as e:
-                self._send(400, json.dumps({"error": f"请求解析失败：{e}"}, ensure_ascii=False))
-                return
         if self.path != "/chat":
             self._send(404, "Not Found", "text/plain; charset=utf-8")
             return
@@ -1877,6 +1910,7 @@ class Handler(BaseHTTPRequestHandler):
 
         # 表情包白名单；用户发的 key 不在库里就不当表情包处理
         _sticker_map = scan_stickers()
+        _stk_meta = _load_sticker_meta()
         if user_sticker not in _sticker_map:
             user_sticker = ""
 
@@ -1934,10 +1968,12 @@ class Handler(BaseHTTPRequestHandler):
                 content = m.get("content", "")
                 _stk = (m.get("sticker") or "").strip()
                 if role == "user" and _stk and _stk in _sticker_map:
+                    _desc = (_stk_meta.get(_stk) or "").strip()
+                    _note = f"【{_stk}】" + (f"（{_desc}）" if _desc else "")
                     if content:
-                        content = content + f"（同时发了个【{_stk}】表情包）"
+                        content = content + f"（同时发了个{_note}表情包）"
                     else:
-                        content = f"（对方发了个【{_stk}】表情包）"
+                        content = f"（对方发了个{_note}表情包）"
                 _imgs = m.get("images") or ([m.get("image")] if m.get("image") else [])
                 _imgs = [x for x in _imgs if x and str(x).startswith("data:image/")]
                 if role == "user" and _imgs:
@@ -1985,7 +2021,8 @@ class Handler(BaseHTTPRequestHandler):
                     img_note = "[分享图片] %d 张图片" % len(attach_urls)
                 _mem_parts.append(img_note)
             if user_sticker:
-                _mem_parts.append(f"（对方发了个【{user_sticker}】表情包）")
+                _desc = (_stk_meta.get(user_sticker) or "").strip()
+                _mem_parts.append(f"（对方发了个【{user_sticker}】表情包" + (f"：{_desc}" if _desc else "") + "）")
             memory_msg = "，".join(_mem_parts)
             _reply_note = _stickers_to_note(reply)  # 怡悠发的表情包标记转中性文本，不进记忆
             try:

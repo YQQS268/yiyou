@@ -265,6 +265,17 @@ def _sticker_names():
         return []
 
 
+def _sticker_meta():
+    """读同目录 stickers_meta.json，返回 {key: 描述}。缺失或损坏返回空 dict。"""
+    try:
+        _p = os.path.join(os.path.dirname(os.path.abspath(__file__)), "stickers_meta.json")
+        with open(_p, "r", encoding="utf-8") as f:
+            _d = json.load(f)
+        return _d if isinstance(_d, dict) else {}
+    except Exception:
+        return {}
+
+
 def _gen_one_say(cfg, items):
     """基于一组未了事/约定，让 flash（非思考模式）生成一句主动想说的话。失败返回 None。"""
     text = "；".join(items)
@@ -273,18 +284,23 @@ def _gen_one_say(cfg, items):
         f"{text}\n\n"
         "基于其中一件，替她想一句她想主动对对方说的话。要求：\n"
         "- 简短、口语化、像微信聊天，一句就够，不要长篇。\n"
-        "- 要有具体的事（比如问那件事怎么样了），不要空泛的「想你了」「在吗」。\n"
-        "- 视角必须锁定：这些事是**对方**的，你要用「提醒对方 / 追问对方 / 关心对方」的口吻说，绝不能用第一人称「我」替对方说（例如对方说「生活费到了去补牙」，你只能说「生活费到了记得去补哦」，不能说「生活费到了我就去补」）。\n"
+        "- 要有具体的事（比如关心那件事怎么样了），不要空泛的「想你了」「在吗」。\n"
+        "- 关心要「关心式」而非「查岗式」：对方说去做某事（打游戏/洗澡/吃饭/忙），你要说「玩得开心吗」「累不累」这类关心，不要催「做完了没」「怎么还没好」。\n"
+        "- 视角必须锁定：这些事是**对方**的，你要用「关心对方 / 提醒对方」的口吻说，绝不能用第一人称「我」替对方说（例如对方说「生活费到了去补牙」，你只能说「生活费到了记得去补哦」，不能说「生活费到了我就去补」）。\n"
         "- 其中有些是「挑时机再说的话」：现在不是合适时机的，就换一件或跳过，别硬说。\n"
         "- 只输出这句话本身，不要任何解释、引号或前缀。\n"
     )
     _stk = _sticker_names()
     if _stk:
         _example = _stk[0] if _stk else "卖萌1"
-        _stk_line = "、".join(f"「{k}」" for k in _stk)
+        _meta = _sticker_meta()
+        _stk_line = "；".join(
+            f"「{k}」" + (f"＝{_meta[k]}" if _meta.get(k) else "")
+            for k in _stk
+        )
         prompt = prompt.replace(
             "- 只输出这句话本身",
-            f"- 可以顺手带一个表情包：想发图时，单独一行写 `[sticker:{_example}]` 这样的格式（把「{_example}」换成你要发的那个名字）。可用名字：{_stk_line}。不想发就不发。禁止用文字描述表情包。\n- 只输出这句话本身",
+            f"- 可以顺手带一个表情包：想发图时，单独一行写 `[sticker:{_example}]` 这样的格式（把「{_example}」换成你要发的那个名字）。可用表情包（名字后标注了它表达什么，按你想表达的感觉选）：{_stk_line}。不想发就不发。禁止用文字描述表情包。\n- 只输出这句话本身",
             1,
         )
     payload = {
